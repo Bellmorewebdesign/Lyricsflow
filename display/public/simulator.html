@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Lyricsflow simulator</title>
+    <style>
+      body {
+        background: #101010;
+        color: white;
+        font: 18px Arial;
+        padding: 24px;
+      }
+      button {
+        font: inherit;
+        padding: 14px;
+        margin: 5px;
+        background: #333;
+        color: white;
+        border: 1px solid #777;
+      }
+      a {
+        color: white;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>Lyricsflow simulator</h1>
+    <p>
+      Open <a href="/display" target="_blank">the display</a> in another tab.
+      This simulator replaces the extension until disconnected.
+    </p>
+    <p id="status">Connecting…</p>
+    <button data-action="play">Play / resume</button
+    ><button data-action="pause">Pause</button
+    ><button data-action="seek">Seek to 0:55</button
+    ><button data-action="next">Next track</button
+    ><button data-action="missing">No lyrics</button
+    ><button data-action="standby">Standby</button
+    ><button data-action="disconnect">Disconnect</button
+    ><button data-action="connect">Reconnect</button>
+    <script src="/display/simulator.js"></script>
+  </body>
+</html>

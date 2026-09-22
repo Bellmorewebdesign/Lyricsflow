@@ -1,0 +1,16 @@
+{
+  "name": "Lyricsflow",
+  "short_name": "Lyricsflow",
+  "start_url": "/display",
+  "display": "standalone",
+  "background_color": "#000000",
+  "theme_color": "#000000",
+  "icons": [
+    {
+      "src": "/display/icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any"
+    }
+  ]
+}

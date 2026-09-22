@@ -1,0 +1,24 @@
+{
+  "manifest_version": 3,
+  "name": "Lyricsflow",
+  "version": "1.0.0",
+  "description": "Send YouTube Music playback to your Lyricsflow display.",
+  "minimum_chrome_version": "116",
+  "permissions": ["storage", "tabs"],
+  "host_permissions": [
+    "https://music.youtube.com/*",
+    "http://192.168.1.14/*",
+    "http://localhost/*",
+    "http://127.0.0.1/*"
+  ],
+  "background": { "service_worker": "worker.js" },
+  "content_scripts": [
+    {
+      "matches": ["https://music.youtube.com/*"],
+      "js": ["content.js"],
+      "run_at": "document_idle"
+    }
+  ],
+  "options_page": "options.html",
+  "action": { "default_title": "Lyricsflow settings" }
+}

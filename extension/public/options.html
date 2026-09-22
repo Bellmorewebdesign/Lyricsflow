@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Lyricsflow settings</title>
+    <style>
+      body {
+        font: 16px system-ui;
+        background: #111;
+        color: #fff;
+        max-width: 34em;
+        margin: 3em auto;
+        padding: 1em;
+      }
+      input {
+        font: inherit;
+        width: 100%;
+        box-sizing: border-box;
+        padding: 0.7em;
+        background: #222;
+        border: 1px solid #555;
+        color: #fff;
+      }
+      button {
+        margin-top: 1em;
+        font: inherit;
+        padding: 0.7em 1.5em;
+      }
+      #status {
+        min-height: 2em;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>Lyricsflow</h1>
+    <p>Atlas WebSocket address</p>
+    <form>
+      <label for="server">Server</label
+      ><input id="server" type="url" required /><button type="submit">
+        Save
+      </button>
+    </form>
+    <p id="status" role="status"></p>
+    <script src="options.js"></script>
+  </body>
+</html>

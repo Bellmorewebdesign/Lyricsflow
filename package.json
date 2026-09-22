@@ -1,0 +1,26 @@
+{
+  "name": "lyricsflow",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "tsx watch server/src/index.ts",
+    "build": "node scripts/build.mjs",
+    "start": "node dist/server/index.js",
+    "test": "node --import tsx --test server/test/*.test.ts",
+    "lint": "tsc --noEmit && prettier --check .",
+    "format": "prettier --write .",
+    "smoke": "node scripts/smoke.mjs"
+  },
+  "dependencies": {
+    "ws": "^8.18.3"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "@types/ws": "^8.18.1",
+    "esbuild": "^0.25.0",
+    "prettier": "^3.6.0",
+    "tsx": "^4.20.0",
+    "typescript": "^5.9.0"
+  }
+}
