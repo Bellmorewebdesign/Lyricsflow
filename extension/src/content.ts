@@ -1,4 +1,6 @@
-import type { SourceState, Command, Track } from "../../shared/protocol.js";
+import type { Command } from "../../shared/protocol.js";
+import { readTrack } from "./metadata.js";
+import { ReportGate } from "./report-gate.js";
 declare const chrome: any;
 let media: HTMLMediaElement | null = null;
 let lastSignature = "";
@@ -6,28 +8,7 @@ let lastPosition = -1;
 let observerTimer: ReturnType<typeof setTimeout> | null = null;
 const $ = (selector: string): HTMLElement | null =>
   document.querySelector(selector);
-function readTrack(): Track | null {
-  const bar = $("ytmusic-player-bar");
-  const title = bar?.querySelector(".title")?.textContent?.trim() || "";
-  const artist =
-    bar?.querySelector(".byline a, .byline")?.textContent?.trim() || "";
-  if (!title || !artist || !media?.duration || !Number.isFinite(media.duration))
-    return null;
-  const image = bar?.querySelector("img") as HTMLImageElement | null;
-  const url = new URL(location.href);
-  const videoId = url.searchParams.get("v") || undefined;
-  const album =
-    bar?.querySelector(".byline a:nth-of-type(2)")?.textContent?.trim() ||
-    undefined;
-  return {
-    title,
-    artist,
-    album,
-    artwork: image?.src || undefined,
-    videoId,
-    durationMs: Math.round(media.duration * 1000),
-  };
-}
+const gate = new ReportGate();
 function findMedia(): void {
   const next = document.querySelector(
     "video, audio",
@@ -56,20 +37,31 @@ function mediaChanged(event: Event): void {
   report(event.type === "seeking" || event.type === "seeked", true);
 }
 function report(seek = false, force = false): void {
-  const track = readTrack();
+  const bar = $("ytmusic-player-bar");
+  const url = new URL(location.href);
+  const track = readTrack(
+    bar,
+    media?.duration || 0,
+    url.searchParams.get("v") || undefined,
+  );
   const positionMs =
     media && Number.isFinite(media.currentTime)
       ? Math.max(0, Math.round(media.currentTime * 1000))
       : 0;
-  const state: SourceState = {
-    type: "SOURCE_STATE",
-    track,
-    positionMs,
-    playing: !!media && !media.paused && !media.ended,
-    ended: !!media?.ended,
-    rate: media?.playbackRate || 1,
-    seek,
-  };
+  const titlePresent = !!bar?.querySelector(".title")?.textContent?.trim();
+  const bylinePresent = !!bar?.querySelector(".byline")?.textContent?.trim();
+  const state = gate.accept(
+    {
+      track,
+      positionMs,
+      playing: !!media && !media.paused && !media.ended,
+      rate: media?.playbackRate || 1,
+      seek,
+      clearEvidence: !titlePresent && !bylinePresent && (!media || media.ended),
+    },
+    Date.now(),
+  );
+  if (!state) return;
   const signature = JSON.stringify([
     track,
     state.playing,

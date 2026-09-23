@@ -38,10 +38,9 @@ export function displayState(
   if (!connected || !snapshot?.sourceConnected) return "DISCONNECTED";
   if (!snapshot.track)
     return lastActive && now - lastActive < 8000 ? "HOLDING" : "STANDBY";
+  if (!snapshot.playing && pausedAt !== null && now - pausedAt >= 60000)
+    return "STANDBY";
   if (!snapshot.lyrics?.lines.length) return "NO_LYRICS";
   if (snapshot.playing) return "PLAYING";
-  if (pausedAt !== null && now - pausedAt < 60000) return "PAUSED";
-  if (lastActive && now - lastActive < 8000 && pausedAt === null)
-    return "PAUSED";
-  return "STANDBY";
+  return "PAUSED";
 }

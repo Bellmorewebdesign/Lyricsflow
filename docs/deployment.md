@@ -25,3 +25,5 @@ journalctl --user -u lyricsflow.service -f
 For startup before your first login, enable linger once for your account (`sudo loginctl enable-linger "$USER"`). This is a system administration choice, so the repository does not run it automatically. If UFW is enabled, permit LAN access to TCP 8766. Do not forward this unauthenticated LAN service to the Internet. Update the software with `git pull && npm ci && npm run build && systemctl --user restart lyricsflow.service`.
 
 Default address: `http://192.168.1.14:8766/display`. Health: `/api/health`. The service declares `After=network-online.target`; a user service still starts even when external Internet or LRCLIB is unavailable, and lookup errors are contained.
+
+If Atlas already uses port 8777, set `Environment=PORT=8777` in the copied user service file and set the desktop extension to `ws://192.168.1.14:8777/ws`. Restart with `systemctl --user daemon-reload && systemctl --user restart lyricsflow.service`. Set `Environment=DEBUG_LYRICS=true` there only while diagnosing lyric matches; the matching cache version changes automatically with this release, so no manual deletion of `data/` is needed.

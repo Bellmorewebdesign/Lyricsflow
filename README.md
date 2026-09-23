@@ -11,7 +11,7 @@ YouTube Music → MV3 extension ↔ Atlas (Node + WebSocket + LRCLIB cache) ↔ 
 - Atlas: Ubuntu, Node.js **22 or newer** and npm. Python 3.14 alone is not enough for this TypeScript/Node app.
 - Desktop: Chrome or Edge **116 or newer**, with YouTube Music open in a tab and this extension installed.
 - Tablet: a browser capable of WebSocket and modern enough for the built assets. Test on the actual Galaxy Tab A; Android 7 stock browser compatibility can vary. Chrome for Android, if available, is recommended.
-- All three devices on the same trusted LAN. Permit inbound TCP 8766 on Atlas. No Internet exposure or port forwarding.
+- All three devices on the same trusted LAN. Permit inbound TCP on the configured Atlas port (8766 by default; use 8777 if 8766 is occupied). No Internet exposure or port forwarding.
 
 ## Layout
 
@@ -39,14 +39,14 @@ HOST=0.0.0.0 PORT=8766 npm start
 
 1. Build on a machine with Node (`npm ci && npm run build`). Copy `dist/extension` to the Windows computer if the build happened on Atlas.
 2. Open `chrome://extensions` (or `edge://extensions`), enable Developer mode, choose **Load unpacked**, select the **dist/extension** folder.
-3. Right click the extension icon → **Options**. Confirm `ws://192.168.1.14:8766/ws` (the default). Reload an already open YouTube Music tab after first installation.
+3. Right click the extension icon → **Options**. Set `ws://192.168.1.14:8777/ws` if Atlas is on your current port 8777 (`8766` is the extension default). Reload an already open YouTube Music tab after first installation.
 4. Start playback at `https://music.youtube.com/`. Keep the browser running. The source lives in the Chrome/Edge service worker; there is no desktop program to start.
 
 If the server IP changes, edit the extension host permissions in `extension/public/manifest.json` to include the new `http://IP/*`, rebuild, and reload the unpacked extension. The options page changes the WebSocket URL. Remote controls click YouTube Music's real player buttons; the following player state confirms the result.
 
 ## Tablet
 
-Open **http://192.168.1.14:8766/display**. Standby is completely black. Tap anywhere to show Previous, Play/Pause, Next for 4.5 seconds. The controls fade out on their own. The current lyric and two adjacent lines appear only when line timed lyrics are available. Pause holds the picture for 60 seconds, then fades to black; resume redraws at the actual player position. The optional web app manifest supports adding a home screen shortcut, but install/fullscreen support on an HTTP LAN origin depends on the Android browser. Use browser full screen or kiosk mode if the browser will not install a PWA over HTTP.
+Open **http://192.168.1.14:8766/display** (or **http://192.168.1.14:8777/display** when configured for port 8777). Standby is completely black. Tap anywhere to show Previous, Play/Pause, Next for 4.5 seconds. The controls fade out on their own. When timed lyrics are available, the current line and two adjacent lines appear. While lyrics load or if no synchronized match exists, the dark artwork, a clear cover image, song title and artist remain visible without an error message. Pause holds either view for 60 seconds, then fades to black; resume redraws at the actual player position. The optional web app manifest supports adding a home screen shortcut, but install/fullscreen support on an HTTP LAN origin depends on the Android browser. Use browser full screen or kiosk mode if the browser will not install a PWA over HTTP.
 
 ## Simulator
 
@@ -62,13 +62,14 @@ For source edits, `npm run dev` restarts the server; run `npm run build` again a
 
 ## How lyrics and timing work
 
-Atlas queries the public [LRCLIB API](https://lrclib.net/docs) for track name and artist, accepts only line timed lyrics after strict cleaned title and primary artist equality, and rejects candidate durations more than roughly 4–8 seconds apart. Common official video/audio tags, featuring credits, and remaster tags are stripped for matching. Alternate mixes with a substantially different duration are rejected. Good matches persist for 30 days under `data/`; missing matches for six hours. API errors do not poison the cache. `LyricsProvider` can be replaced without changing the display or server protocol. Provider availability and licensing remain subject to LRCLIB; no lyrics are bundled or generated.
+Atlas queries the public [LRCLIB API](https://lrclib.net/docs) first with cleaned title and artist. If that search returns no acceptable timed match, it searches by title and scores every candidate locally. A transliterated title search may be tried for accented or stylized titles. Acceptance still requires the exact normalized title, matching artist or a clearly matching credited primary artist, and duration within roughly 4–8 seconds. Common official video/audio tags, explicit markers, featuring credits, and remaster tags are stripped for matching. Alternate mixes with a substantially different duration are rejected. Good matches persist for 30 days under `data/`; missing matches for six hours. The matching cache is versioned, so old negative results do not need to be deleted. API errors do not poison the cache. Set `DEBUG_LYRICS=true` in the server environment to see query metadata, result counts and short candidate rejection reasons without logging lyric bodies. `LyricsProvider` can be replaced without changing the display or server protocol. Provider availability and licensing remain subject to LRCLIB; no lyrics are bundled or generated.
 
-The extension reads `HTMLMediaElement.currentTime`, `duration`, `paused`, `ended` and `playbackRate`; player bar metadata supplies title, artist and cover. Atlas sends the entire lyric timeline on a track update and sends authoritative playback position. The tablet extrapolates from **local elapsed time since receipt**, schedules the next line boundary, and gently corrects small heartbeat drift. Seek, pause, resume and track changes update immediately. If synced lyrics do not exist, the screen stays black while controls remain accessible.
+The extension reads `HTMLMediaElement.currentTime`, `duration`, `paused`, `ended` and `playbackRate`; player bar metadata supplies title, artist, album and cover. Dedicated artist links take precedence, and bullet-separated bylines are parsed as distinct artist/album/year fields. An incomplete read during a song transition does not immediately erase a valid track. Atlas sends the entire lyric timeline on a track update and sends authoritative playback position. The tablet extrapolates from **local elapsed time since receipt**, schedules the next line boundary, and gently corrects small heartbeat drift. Seek, pause, resume and track changes update immediately. Without synchronized lyrics, it shows the cover and track information instead.
 
 ## Troubleshooting
 
-- **Blank display while music plays:** check `/api/health` for `sourceConnected: true`, extension options IP/port and `chrome://extensions` → service worker errors. The display is deliberately black when LRCLIB has no suitable synchronized match or while lyrics are loading. Try the simulator to isolate the display.
+- **Blank display while music plays:** check `/api/health` for `sourceConnected: true`, extension options IP/port and `chrome://extensions` → service worker errors. A valid track should show artwork and its title even without lyrics. Try the simulator to isolate the display.
+- **Artwork visible but lyrics missing:** check Atlas logs for quoted title, artist and duration. Temporarily launch Atlas with `DEBUG_LYRICS=true` to inspect result counts and candidate rejection reasons. Older missing-result cache entries are ignored by this version; you do not need to clear `data/`.
 - **Extension connected but no track:** reload the YouTube Music tab after installing the extension; check the tab's console for selector changes. YouTube Music is a third party SPA, and DOM selectors can change.
 - **Tablet does not load:** verify Atlas IP, Wi-Fi, port 8766, and Ubuntu firewall (`sudo ufw allow 8766/tcp` if UFW is enabled). Test from the tablet with `/api/health`.
 - **Artwork missing:** metadata art URLs may expire or fail; lyrics still work on black.

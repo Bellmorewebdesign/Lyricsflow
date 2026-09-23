@@ -47,7 +47,13 @@ try {
     await new Promise((resolve) => setTimeout(resolve, 50));
   }
   assert.ok(ready, "server started");
-  assert.equal((await fetch(`http://127.0.0.1:${port}/display`)).status, 200);
+  const displayResponse = await fetch(`http://127.0.0.1:${port}/display`);
+  assert.equal(displayResponse.status, 200);
+  const html = await displayResponse.text();
+  assert.ok(
+    html.includes('id="cover-title"') && html.includes('id="cover"'),
+    "artwork-only track view exists",
+  );
   assert.equal((await fetch(`http://127.0.0.1:${port}/simulator`)).status, 200);
   display = await open(`ws://127.0.0.1:${port}/ws`);
   display.send(JSON.stringify({ type: "HELLO", role: "display", protocol: 1 }));
@@ -91,7 +97,27 @@ try {
     JSON.stringify({ type: "CONTROL_ACK", id: "smoke", delivered: true }),
   );
   assert.equal((await ack).delivered, true);
-  console.log("Smoke passed: HTTP, timed lyrics, control routing and ACK");
+  const missing = waitFor(
+    display,
+    (msg) =>
+      msg.type === "SERVER_STATE" &&
+      msg.track?.title === "Untimed Sample" &&
+      msg.lyrics === null,
+  );
+  source.send(
+    JSON.stringify({
+      ...state,
+      track: {
+        ...state.track,
+        title: "Untimed Sample",
+        videoId: "lyricsflow-demo-no-lyrics",
+      },
+    }),
+  );
+  assert.equal((await missing).track.artist, "Ensemble");
+  console.log(
+    "Smoke passed: HTTP, timed and missing lyrics, artwork view, control routing and ACK",
+  );
 } finally {
   display?.close();
   source?.close();

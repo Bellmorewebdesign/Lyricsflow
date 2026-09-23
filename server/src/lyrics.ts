@@ -5,15 +5,20 @@ import type { Lyrics, Line, Track } from "../../shared/protocol.js";
 
 export function cleanTitle(value: string): string {
   return value
+    .replace(/\s*[\[(]\d{4}\s+remaster(?:ed)?[\])]/gi, "")
     .replace(
-      /\s*[\[(](?:official\s+)?(?:music\s+)?(?:video|audio|visualizer|lyric(?:s)?(?:\s+video)?|remaster(?:ed)?(?:\s+\d{4})?)[^\])]*[\])]/gi,
+      /\s*[\[(](?:official\s+)?(?:music\s+)?(?:video|audio|visualizer|lyric(?:s)?(?:\s+video)?|remaster(?:ed)?(?:\s+\d{4})?|explicit|clean)[^\])]*[\])]/gi,
       "",
     )
     .replace(
       /\s*[-–|]\s*(?:official\s+)?(?:music\s+)?(?:video|audio|visualizer|lyrics?)(?:\s+video)?\s*$/gi,
       "",
     )
-    .replace(/\s*(?:\(|\[)?(?:feat\.?|ft\.?)\s+[^)\]]+(?:\)|\])?/gi, "")
+    .replace(
+      /\s*(?:\(|\[)?(?:feat\.?|ft\.?|featuring)\s+[^)\]]+(?:\)|\])?/gi,
+      "",
+    )
+    .replace(/\s*🅴\s*$/u, "")
     .trim();
 }
 export function normalize(value: string): string {
@@ -27,10 +32,23 @@ export function normalize(value: string): string {
     .replace(/\s+/g, " ");
 }
 export function normalizeArtist(value: string): string {
+  // A comma or ampersand may be part of a real stage name, so preserve it.
   return normalize(
     value
-      .replace(/\s+(?:feat\.?|ft\.?)\s+.*$/i, "")
-      .split(/\s*[,;&]\s*|\s+and\s+/i)[0] || value,
+      .split(/[•·]/)[0]!
+      .replace(/\s+(?:feat\.?|ft\.?|featuring)\s+.*$/i, ""),
+  );
+}
+function primaryArtist(value: string): string {
+  // A comma can credit collaborators, except for established "Name, The ..." names.
+  const withoutFeature = value.replace(
+    /\s+(?:feat\.?|ft\.?|featuring)\s+.*$/i,
+    "",
+  );
+  return normalizeArtist(
+    /,\s+the\b/i.test(withoutFeature)
+      ? withoutFeature
+      : withoutFeature.split(/,\s+/)[0]!,
   );
 }
 export function parseLrc(raw: string): Line[] {
@@ -55,21 +73,35 @@ export function parseLrc(raw: string): Line[] {
     .sort((a, b) => a.startMs - b.startMs)
     .filter((l, i, arr) => i === 0 || l.startMs !== arr[i - 1]?.startMs);
 }
-interface Result {
+export interface Result {
   trackName: string;
   artistName: string;
   duration: number;
   syncedLyrics: string | null;
   instrumental?: boolean;
 }
-export function matchScore(track: Track, item: Result): number {
-  if (!item.syncedLyrics || item.instrumental) return -1;
+export function assessMatch(
+  track: Track,
+  item: Result,
+): { score: number; reason: string } {
+  if (!item.syncedLyrics || item.instrumental)
+    return { score: -1, reason: "no syncedLyrics" };
   const title = normalize(track.title),
     candidate = normalize(item.trackName);
+  if (!title || title !== candidate)
+    return { score: -1, reason: "title mismatch" };
   const artist = normalizeArtist(track.artist),
     candidateArtist = normalizeArtist(item.artistName);
-  if (!title || !artist || title !== candidate || artist !== candidateArtist)
-    return -1;
+  const primary = primaryArtist(track.artist),
+    candidatePrimary = primaryArtist(item.artistName);
+  const fullArtistMatch = !!artist && artist === candidateArtist;
+  const safePrimaryMatch =
+    !!primary &&
+    primary.length >= 4 &&
+    primary === candidatePrimary &&
+    (artist === primary || candidateArtist === candidatePrimary);
+  if (!fullArtistMatch && !safePrimaryMatch)
+    return { score: -1, reason: "artist mismatch" };
   // Allow modest encoding/player rounding errors, but reject alternate cuts and live versions.
   const difference =
     track.durationMs > 0
@@ -79,8 +111,14 @@ export function matchScore(track: Track, item: Result): number {
     track.durationMs > 0 &&
     difference > Math.max(4, Math.min(8, item.duration * 0.025))
   )
-    return -1;
-  return 100 - difference;
+    return { score: -1, reason: "duration mismatch" };
+  return {
+    score: (fullArtistMatch ? 110 : 100) - difference,
+    reason: "accepted",
+  };
+}
+export function matchScore(track: Track, item: Result): number {
+  return assessMatch(track, item).score;
 }
 export interface LyricsProvider {
   name: string;
@@ -88,14 +126,63 @@ export interface LyricsProvider {
 }
 export class LrclibProvider implements LyricsProvider {
   name = "LRCLIB";
+  constructor(private readonly debug = process.env.DEBUG_LYRICS === "true") {}
   async getSyncedLyrics(track: Track): Promise<Lyrics | null> {
     if (!normalize(track.title) || !normalizeArtist(track.artist)) return null;
+    const queryTitle = cleanTitle(track.title);
+    const queryArtist = track.artist
+      .split(/[•·]/)[0]!
+      .replace(/\s+(?:feat\.?|ft\.?|featuring)\s+.*$/i, "")
+      .trim();
+    if (this.debug)
+      console.info(
+        `LRCLIB query: ${JSON.stringify(queryTitle)} — ${JSON.stringify(queryArtist)} [${(track.durationMs / 1000).toFixed(1)}s]`,
+      );
+    let matched: Lyrics | null = null;
+    const searches: {
+      track_name?: string;
+      artist_name?: string;
+      q?: string;
+    }[] = [
+      { track_name: queryTitle, artist_name: queryArtist },
+      { track_name: queryTitle },
+    ];
+    if (normalize(queryTitle) !== queryTitle.toLowerCase())
+      searches.push({ q: normalize(queryTitle) });
+    for (const params of searches) {
+      const results = await this.search(params);
+      const ranked = results
+        .map((item) => ({ item, ...assessMatch(track, item) }))
+        .sort((a, b) => b.score - a.score);
+      if (this.debug) {
+        console.info(
+          `LRCLIB results: ${results.length} for ${JSON.stringify(params)}`,
+        );
+        for (const candidate of ranked.slice(0, 5))
+          console.info(
+            `LRCLIB candidate: ${JSON.stringify(candidate.item.trackName)} — ${JSON.stringify(candidate.item.artistName)} [${candidate.item.duration.toFixed(1)}s]: ${candidate.reason}`,
+          );
+      }
+      for (const candidate of ranked) {
+        if (candidate.score < 0) break;
+        const lines = parseLrc(candidate.item.syncedLyrics || "");
+        if (lines.length) {
+          matched = { provider: this.name, lines };
+          break;
+        }
+      }
+      if (matched) break;
+    }
+    return matched;
+  }
+  private async search(params: {
+    track_name?: string;
+    artist_name?: string;
+    q?: string;
+  }): Promise<Result[]> {
     const url = new URL("https://lrclib.net/api/search");
-    url.searchParams.set("track_name", cleanTitle(track.title));
-    url.searchParams.set(
-      "artist_name",
-      track.artist.replace(/\s+(?:feat\.?|ft\.?)\s+.*$/i, ""),
-    );
+    for (const [key, value] of Object.entries(params))
+      if (value) url.searchParams.set(key, value);
     const response = await fetch(url, {
       signal: AbortSignal.timeout(7000),
       headers: {
@@ -107,20 +194,16 @@ export class LrclibProvider implements LyricsProvider {
     if (!response.ok) throw new Error(`LRCLIB HTTP ${response.status}`);
     const items: unknown = await response.json();
     if (!Array.isArray(items)) throw new Error("Invalid LRCLIB response");
-    const results = items.filter(
+    return items.filter(
       (v): v is Result =>
         v &&
         typeof v.trackName === "string" &&
         typeof v.artistName === "string" &&
         typeof v.duration === "number" &&
+        Number.isFinite(v.duration) &&
+        v.duration > 0 &&
         (typeof v.syncedLyrics === "string" || v.syncedLyrics === null),
     );
-    const best = results
-      .map((item) => ({ item, score: matchScore(track, item) }))
-      .sort((a, b) => b.score - a.score)[0];
-    if (!best || best.score < 0 || !best.item.syncedLyrics) return null;
-    const lines = parseLrc(best.item.syncedLyrics);
-    return lines.length ? { provider: this.name, lines } : null;
   }
 }
 interface CacheEntry {
@@ -136,6 +219,7 @@ export class LyricsService {
   ) {}
   async get(track: Track): Promise<Lyrics | null> {
     const key = createHash("sha256")
+      .update("lyrics-match-v2\0")
       .update(
         JSON.stringify([
           normalize(track.title),

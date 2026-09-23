@@ -8,6 +8,10 @@ import {
 const scene = document.querySelector<HTMLElement>("#scene")!;
 const artistEl = document.querySelector<HTMLElement>("#artist")!;
 const titleEl = document.querySelector<HTMLElement>("#title")!;
+const coverEl = document.querySelector<HTMLImageElement>("#cover")!;
+const coverTitleEl = document.querySelector<HTMLElement>("#cover-title")!;
+const coverArtistEl = document.querySelector<HTMLElement>("#cover-artist")!;
+const coverAlbumEl = document.querySelector<HTMLElement>("#cover-album")!;
 const lyricEls = Array.from(document.querySelectorAll<HTMLElement>(".line"));
 const controls = document.querySelector<HTMLElement>("#controls")!;
 const playButton = document.querySelector<HTMLButtonElement>("#play")!;
@@ -37,13 +41,19 @@ function applyState(next: DisplayState): void {
   const visible =
     next === "PLAYING" ||
     next === "PAUSED" ||
+    next === "NO_LYRICS" ||
     next === "HOLDING" ||
     (next === "DISCONNECTED" &&
       disconnectedAt !== null &&
       Date.now() - disconnectedAt < 10000 &&
       scene.classList.contains("visible"));
   scene.classList.toggle("visible", visible);
-  scene.classList.toggle("paused", next === "PAUSED");
+  scene.classList.toggle(
+    "paused",
+    next === "PAUSED" || (next === "NO_LYRICS" && !snapshot?.playing),
+  );
+  if (next !== "HOLDING" && next !== "DISCONNECTED")
+    scene.classList.toggle("no-lyrics", next === "NO_LYRICS");
   document.body.classList.toggle("black", !visible);
 }
 function showArtwork(url: string): void {
@@ -65,7 +75,12 @@ function showArtwork(url: string): void {
     : "none";
   incoming.classList.add("active");
   outgoing.classList.remove("active");
+  coverEl.style.visibility = safe ? "visible" : "hidden";
+  if (safe) coverEl.src = safe;
 }
+coverEl.onerror = () => {
+  coverEl.style.visibility = "hidden";
+};
 function render(): void {
   if (renderTimer) {
     clearTimeout(renderTimer);
@@ -80,7 +95,11 @@ function render(): void {
   applyState(next);
   if (next === "HOLDING")
     standbyTimer = setTimeout(render, Math.max(1, lastActive + 8000 - now));
-  if (next === "PAUSED" && pausedAt !== null)
+  if (
+    (next === "PAUSED" || next === "NO_LYRICS") &&
+    !snapshot?.playing &&
+    pausedAt !== null
+  )
     standbyTimer = setTimeout(render, Math.max(1, pausedAt + 60000 - now));
   if (
     next === "DISCONNECTED" &&
@@ -88,13 +107,7 @@ function render(): void {
     now - disconnectedAt < 10000
   )
     standbyTimer = setTimeout(render, 10000 - (now - disconnectedAt));
-  if (
-    !snapshot?.track ||
-    !snapshot.lyrics?.lines.length ||
-    next === "STANDBY" ||
-    next === "NO_LYRICS"
-  )
-    return;
+  if (!snapshot?.track || next === "STANDBY") return;
   if (snapshot.version !== trackVersion) {
     trackVersion = snapshot.version;
     activeLine = -99;
@@ -103,7 +116,14 @@ function render(): void {
     titleEl.textContent = snapshot.track.title;
   if (artistEl.textContent !== snapshot.track.artist)
     artistEl.textContent = snapshot.track.artist;
+  if (coverTitleEl.textContent !== snapshot.track.title)
+    coverTitleEl.textContent = snapshot.track.title;
+  if (coverArtistEl.textContent !== snapshot.track.artist)
+    coverArtistEl.textContent = snapshot.track.artist;
+  if (coverAlbumEl.textContent !== (snapshot.track.album || ""))
+    coverAlbumEl.textContent = snapshot.track.album || "";
   showArtwork(snapshot.track.artwork || "");
+  if (next === "NO_LYRICS" || !snapshot.lyrics?.lines.length) return;
   const position = effectivePosition(snapshot, receipt, performance.now());
   const lines = snapshot.lyrics.lines;
   const index = lineIndex(lines, position);

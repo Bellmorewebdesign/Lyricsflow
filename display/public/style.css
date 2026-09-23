@@ -74,6 +74,7 @@ header {
   letter-spacing: 0.06em;
   line-height: 1.5;
   color: rgba(255, 255, 255, 0.85);
+  transition: opacity 0.45s ease;
 }
 #title {
   font-weight: 600;
@@ -112,6 +113,55 @@ header {
   transform: translateY(-50%);
   display: flex;
   flex-direction: column;
+  transition: opacity 0.45s ease;
+}
+.artwork-view {
+  position: absolute;
+  left: 8%;
+  right: 8%;
+  top: 46%;
+  transform: translateY(-50%);
+  text-align: center;
+  opacity: 0;
+  visibility: hidden;
+  transition:
+    opacity 0.45s ease,
+    visibility 0s linear 0.45s;
+}
+.artwork-view img {
+  display: block;
+  width: 32vw;
+  height: 32vw;
+  max-width: 250px;
+  max-height: 250px;
+  margin: 0 auto 22px;
+  object-fit: cover;
+}
+.cover-title {
+  font-size: 30px;
+  font-weight: 600;
+  line-height: 1.2;
+}
+.cover-artist {
+  margin-top: 9px;
+  font-size: 19px;
+  color: rgba(255, 255, 255, 0.7);
+}
+.cover-album {
+  margin-top: 7px;
+  font-size: 14px;
+  color: rgba(255, 255, 255, 0.42);
+}
+#scene.no-lyrics .artwork-view {
+  opacity: 1;
+  visibility: visible;
+  transition:
+    opacity 0.45s ease,
+    visibility 0s;
+}
+#scene.no-lyrics .lyrics,
+#scene.no-lyrics header {
+  opacity: 0;
 }
 .line {
   min-height: 1em;
@@ -197,6 +247,10 @@ button:focus-visible {
   outline: 2px solid #fff;
 }
 @media (orientation: portrait) {
+  .artwork-view img {
+    width: 62vw;
+    height: 62vw;
+  }
   .lyrics {
     left: 9%;
     right: 9%;

@@ -14,6 +14,12 @@ const service = new LyricsService(
   new LrclibProvider(),
   process.env.DATA_DIR || join(process.cwd(), "data"),
 );
+const describeTrack = (
+  track: { title: string; artist: string; durationMs: number } | null,
+): string =>
+  track
+    ? `${JSON.stringify(track.title)} — ${JSON.stringify(track.artist)} [${(track.durationMs / 1000).toFixed(1)}s]`
+    : "(none)";
 let source: WebSocket | null = null;
 const displays = new Set<WebSocket>();
 const alive = new Map<WebSocket, boolean>();
@@ -136,7 +142,7 @@ wss.on("connection", (ws) => {
       broadcast();
       if (changed) {
         const snap = state.snapshot;
-        console.info("Track changed:", snap.track?.title || "(none)");
+        console.info("Track changed:", describeTrack(snap.track));
         if (simulator && snap.track?.videoId?.startsWith("lyricsflow-demo-")) {
           const lyrics =
             snap.track.videoId === "lyricsflow-demo-no-lyrics"
@@ -160,14 +166,18 @@ wss.on("connection", (ws) => {
             .then((lyrics) => {
               if (state.setLyrics(snap.version, lyrics)) {
                 console.info(
-                  lyrics ? "Lyrics found" : "Lyrics not found",
-                  snap.track?.title,
+                  lyrics ? "Lyrics found:" : "Lyrics not found:",
+                  describeTrack(snap.track),
                 );
                 broadcast();
               }
             })
             .catch((error) => {
-              console.warn("Lyrics provider error:", error);
+              console.warn(
+                "Lyrics provider error:",
+                describeTrack(snap.track),
+                error,
+              );
             });
       }
     }
