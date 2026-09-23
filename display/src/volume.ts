@@ -13,7 +13,7 @@ export class VolumeThrottle {
 
   input(value: number): void {
     if (!Number.isFinite(value)) return;
-    this.pending = Math.max(0, Math.min(1, value));
+    this.pending = Math.max(0, Math.min(0.75, value));
     if (this.now() - this.lastSent >= this.intervalMs) this.flush();
     else if (!this.timer)
       this.timer = setTimeout(
@@ -26,7 +26,7 @@ export class VolumeThrottle {
     if (!Number.isFinite(value)) return;
     if (this.timer) clearTimeout(this.timer);
     this.timer = null;
-    this.pending = Math.max(0, Math.min(1, value));
+    this.pending = Math.max(0, Math.min(0.75, value));
     if (
       this.lastValue !== this.pending ||
       this.now() - this.lastSent >= this.intervalMs
@@ -60,6 +60,7 @@ export class VolumeSlider {
   private pendingTimer: ReturnType<typeof setTimeout> | null = null;
   private readonly throttle: VolumeThrottle;
   private ignoreMouseUntil = 0;
+  private readonly label: HTMLElement | null;
 
   get interacting(): boolean {
     return this.active;
@@ -75,6 +76,7 @@ export class VolumeSlider {
   ) {
     input.disabled = true;
     input.value = "0";
+    this.label = input.nextElementSibling as HTMLElement | null;
     this.throttle = new VolumeThrottle((volume) => {
       const id = send(volume);
       if (!id) return;
@@ -130,6 +132,8 @@ export class VolumeSlider {
     input.addEventListener("input", (event) => {
       if (!this.active || input.disabled || !trusted(event)) return;
       this.reveal();
+      if (this.label)
+        this.label.textContent = `${Math.round(this.value() * 100)}%`;
       this.throttle.input(this.value());
     });
     input.addEventListener("change", finish);
@@ -155,6 +159,7 @@ export class VolumeSlider {
       if (this.pendingTimer) clearTimeout(this.pendingTimer);
       this.pendingTimer = null;
       this.input.value = "0";
+      if (this.label) this.label.textContent = "";
       return;
     }
     this.confirmed = volume;
@@ -180,9 +185,13 @@ export class VolumeSlider {
 
   private refresh(): void {
     if (this.active || this.pending || this.confirmed === null) return;
-    const value = Math.round(this.confirmed * 100);
-    this.input.value = String(value);
-    this.input.setAttribute("aria-valuetext", value + "%");
+    const actual = Math.round(this.confirmed * 100);
+    this.input.value = String(Math.min(actual, 75));
+    if (this.label) this.label.textContent = `${actual}%`;
+    this.input.setAttribute(
+      "aria-valuetext",
+      actual > 75 ? `${actual}% (higher on desktop)` : `${actual}%`,
+    );
   }
 
   private cancel(): void {

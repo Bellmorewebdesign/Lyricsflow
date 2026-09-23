@@ -28,7 +28,7 @@ Default address: `http://192.168.1.14:8766/display`. Health: `/api/health`. The 
 
 If Atlas already uses port 8777, set `Environment=PORT=8777` in the copied user service file and set the desktop extension to `ws://192.168.1.14:8777/ws`. Restart with `systemctl --user daemon-reload && systemctl --user restart lyricsflow.service`. Set `Environment=DEBUG_LYRICS=true` there only while diagnosing lyric matches; the matching cache version changes automatically with this release, so no manual deletion of `data/` is needed.
 
-For this protocol v3 upgrade, update the copied `dist/extension` folder on Windows, reload the unpacked extension in Edge, reload the YouTube Music tab, and refresh the Galaxy display page after rebuilding and restarting Atlas. Volume is read from the real YouTube Music media element, so the old extension build cannot provide it.
+For this protocol v3 upgrade, update the copied `dist/extension` folder on Windows, reload the unpacked extension in Edge, reload the YouTube Music tab, and refresh the Galaxy display page after rebuilding and restarting Atlas. The current tablet volume slider needs the separate Windows master volume companion described below.
 
 For the volume safety update, first stop the process currently bound to port 8777 (check with `ss -ltnp '( sport = :8777 )'`). If running manually, rebuild and launch from the repository with `HOST=0.0.0.0 PORT=8777 npm start`; if using the user service, rebuild and restart that service instead. Confirm `curl -fsS http://127.0.0.1:8777/display | grep 'id="volume"'` shows the new slider. Update the extension and refresh the Galaxy page after Atlas is serving v3.
 
@@ -41,3 +41,9 @@ On a service restart, Atlas closes connected WebSocket clients so systemd can st
 ## Volume persistence and popular-song lyric update
 
 Pull main and rebuild on Atlas, then restart the process actually bound to port 8777. The extension build now reports version `1.0.5` when it connects. Copy the newly built `dist/extension` to a fresh Windows folder, remove or disable all older unpacked Lyricsflow extensions in Edge, load the new folder, and reload YouTube Music. The Galaxy page can be refreshed without reinstalling the display. If Atlas logs `Extension connected: unknown build`, an old extension remains active. This change updates the matching cache namespace without removing files from `data/`. LRCLIB searches can now proceed safely when a song length is temporarily unknown.
+
+## Windows master volume and YouTube Music timing update
+
+After pulling this update, `npm run build` and restart `lyricsflow.service` on Atlas (port 8777). Refresh the Galaxy page. The slider remains disabled until the new Windows volume companion connects; `/api/health` reports `volumeConnected: true` once it does. The browser's own volume is no longer the tablet's slider source. Set YouTube Music's volume manually to your preferred level (100% if you want only Windows master volume for everyday adjustment).
+
+Copy `windows/Lyricsflow-MasterVolume.ps1` from Atlas to the Windows desktop and start it in the signed-in user's PowerShell session, with `-ServerUrl ws://192.168.1.14:8777/ws`. It needs only built-in Windows PowerShell and Core Audio, no administrator access or third-party module. Keep the PowerShell process running while using the tablet; it reconnects after Atlas restarts. To update the visible YouTube Music timing behavior, also copy the freshly built `dist/extension` to Windows and reload the unpacked extension and its YouTube Music tab. Atlas should log extension build `1.0.6`. Refresh the Galaxy once. Old missing-result cache entries are ignored by the new matching namespace, so do not delete `data/`.

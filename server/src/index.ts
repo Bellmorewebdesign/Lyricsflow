@@ -22,11 +22,12 @@ const describeTrack = (
     ? `${JSON.stringify(track.title)} — ${JSON.stringify(track.artist)} [${(track.durationMs / 1000).toFixed(1)}s]`
     : "(none)";
 let source: WebSocket | null = null;
+let volumeAgent: WebSocket | null = null;
 const displays = new Set<WebSocket>();
 const alive = new Map<WebSocket, boolean>();
 const pendingCommands = new Map<
   string,
-  { ws: WebSocket; timer: ReturnType<typeof setTimeout> }
+  { ws: WebSocket; target: WebSocket; timer: ReturnType<typeof setTimeout> }
 >();
 const send = (ws: WebSocket, message: Outgoing) => {
   if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(message));
@@ -59,6 +60,7 @@ const server = createServer(async (req, res) => {
       JSON.stringify({
         ok: true,
         sourceConnected: source?.readyState === WebSocket.OPEN,
+        volumeConnected: volumeAgent?.readyState === WebSocket.OPEN,
         displays: displays.size,
       }),
     );
@@ -121,7 +123,7 @@ server.on("upgrade", (req, socket, head) => {
 wss.on("connection", (ws) => {
   alive.set(ws, true);
   ws.on("pong", () => alive.set(ws, true));
-  let role: "source" | "display" | null = null;
+  let role: "source" | "display" | "volume" | null = null;
   const helloTimer = setTimeout(() => {
     if (!role) ws.close();
   }, 5000);
@@ -145,6 +147,13 @@ wss.on("connection", (ws) => {
         state.connect();
         broadcast();
         console.info("Extension connected:", msg.build || "unknown build");
+      } else if (role === "volume") {
+        if (volumeAgent && volumeAgent !== ws)
+          volumeAgent.close(1000, "Replaced by new volume agent");
+        volumeAgent = ws;
+        state.setMasterVolume(null);
+        broadcast();
+        console.info("Windows master volume connected");
       } else {
         displays.add(ws);
         send(ws, state.snapshot);
@@ -153,13 +162,7 @@ wss.on("connection", (ws) => {
       return;
     }
     if (role === "source" && msg.type === "SOURCE_STATE" && source === ws) {
-      const previousVolume = state.snapshot.volume;
       const changed = state.update(msg);
-      if (process.env.DEBUG_VOLUME === "true" && previousVolume !== msg.volume)
-        console.info(
-          "Source volume:",
-          msg.volume === null ? "unknown" : `${Math.round(msg.volume * 100)}%`,
-        );
       broadcast();
       if (changed) {
         lookups.stop();
@@ -190,24 +193,44 @@ wss.on("connection", (ws) => {
       }
     }
     if (
+      role === "volume" &&
+      ws === volumeAgent &&
+      msg.type === "MASTER_VOLUME_STATE"
+    ) {
+      state.setMasterVolume(msg);
+      broadcast();
+    }
+    if (
       role === "display" &&
       (msg.type === "CONTROL_COMMAND" || msg.type === "SET_VOLUME") &&
       !pendingCommands.has(msg.id)
     ) {
-      if (!source || source.readyState !== WebSocket.OPEN) {
+      // Galaxy can raise Windows output only to 75%. Desktop controls can
+      // still raise it higher; reports above 75% remain authoritative.
+      const target = msg.type === "SET_VOLUME" ? volumeAgent : source;
+      if (
+        (msg.type === "SET_VOLUME" && msg.volume > 0.75) ||
+        !target ||
+        target.readyState !== WebSocket.OPEN ||
+        (msg.type === "SET_VOLUME" && state.snapshot.volume === null)
+      ) {
         send(ws, { type: "CONTROL_ACK", id: msg.id, delivered: false });
         return;
       }
-      send(source, msg);
+      send(target, msg);
       const timer = setTimeout(() => {
         pendingCommands.delete(msg.id);
         send(ws, { type: "CONTROL_ACK", id: msg.id, delivered: false });
       }, 3000);
-      pendingCommands.set(msg.id, { ws, timer });
+      pendingCommands.set(msg.id, { ws, target, timer });
     }
-    if (role === "source" && msg.type === "CONTROL_ACK" && source === ws) {
+    if (
+      msg.type === "CONTROL_ACK" &&
+      ((role === "source" && source === ws) ||
+        (role === "volume" && volumeAgent === ws))
+    ) {
       const pending = pendingCommands.get(msg.id);
-      if (pending) {
+      if (pending?.target === ws) {
         clearTimeout(pending.timer);
         pendingCommands.delete(msg.id);
         send(pending.ws, msg);
@@ -224,14 +247,22 @@ wss.on("connection", (ws) => {
       broadcast();
       console.info("Extension disconnected");
     }
+    if (role === "volume" && volumeAgent === ws) {
+      volumeAgent = null;
+      state.setMasterVolume(null);
+      broadcast();
+      console.info("Windows master volume disconnected");
+    }
     if (role === "display") {
       displays.delete(ws);
       console.info("Display disconnected");
     }
     for (const [id, pending] of pendingCommands)
-      if (pending.ws === ws) {
+      if (pending.ws === ws || pending.target === ws) {
         clearTimeout(pending.timer);
         pendingCommands.delete(id);
+        if (pending.target === ws)
+          send(pending.ws, { type: "CONTROL_ACK", id, delivered: false });
       }
   });
   ws.on("error", (error) => console.warn("WebSocket error:", error.message));
@@ -239,7 +270,7 @@ wss.on("connection", (ws) => {
 // Correct drift and detect a dead source without requiring constant tablet messages.
 const heartbeat = setInterval(() => {
   broadcast();
-  for (const ws of [source, ...displays]) {
+  for (const ws of [source, volumeAgent, ...displays]) {
     if (ws?.readyState !== WebSocket.OPEN) continue;
     if (!alive.get(ws)) {
       ws.terminate();

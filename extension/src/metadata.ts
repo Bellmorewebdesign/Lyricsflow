@@ -95,6 +95,74 @@ export function readPlayerDuration(bar: Element | null): number {
   return Number.isFinite(max) && max > 100 && max < 12 * 3600 ? max : 0;
 }
 
+/** Read the clock that YouTube Music shows to its listener, if it is present. */
+export function readPlayerPosition(bar: Element | null): number | null {
+  const label = bar?.querySelector(".time-info")?.textContent || "";
+  const clock = (label.split("/")[0] || "").match(
+    /\d{1,3}:\d{2}(?::\d{2})?/g,
+  )?.[0];
+  if (clock) {
+    const value = parseClock(clock);
+    if (value || /^0+:0{2}(?::0{2})?$/.test(clock)) return value * 1000;
+  }
+  const slider =
+    bar?.querySelector("#progress-bar #sliderBar[aria-valuenow]") ||
+    bar?.querySelector("#progress-bar [role='slider'][aria-valuenow]");
+  const max = Number(slider?.getAttribute("aria-valuemax"));
+  const current = Number(slider?.getAttribute("aria-valuenow"));
+  // A max of 100 may describe percentage, not playback seconds.
+  return Number.isFinite(max) &&
+    max > 100 &&
+    Number.isFinite(current) &&
+    current >= 0 &&
+    current <= max
+    ? Math.round(current * 1000)
+    : null;
+}
+
+/** Trust the visible clock, but ignore a stopped UI clock while media plays. */
+export class PlayerPositionTracker {
+  private clock: number | null = null;
+  private since = 0;
+  private transitionUntil = 0;
+  beginTransition(now: number): void {
+    // The player bar may still show the outgoing song's clock after the
+    // media element has already restarted for the next song.
+    this.transitionUntil = now + 3500;
+  }
+  resolve(
+    bar: Element | null,
+    mediaMs: number,
+    playing: boolean,
+    now: number,
+    seek = false,
+  ): number {
+    const clock = readPlayerPosition(bar);
+    if (clock === null) {
+      this.clock = null;
+      return mediaMs;
+    }
+    if (clock !== this.clock) {
+      this.clock = clock;
+      this.since = now;
+    }
+    if (
+      playing &&
+      now < this.transitionUntil &&
+      Math.abs(clock - mediaMs) > 1500
+    )
+      return mediaMs;
+    if (
+      playing &&
+      (now - this.since > 2500 || seek) &&
+      Math.abs(clock - mediaMs) > 1500
+    )
+      return mediaMs;
+    // Retain the media element's sub-second precision when the clocks agree.
+    return Math.abs(clock - mediaMs) <= 1500 ? clock + (mediaMs % 1000) : clock;
+  }
+}
+
 /** Confirm a duration before matching lyrics; changing media durations are ignored. */
 export class PlayerDurationTracker {
   private identity = "";

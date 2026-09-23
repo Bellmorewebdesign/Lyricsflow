@@ -2,6 +2,7 @@ import type { SourceState, Track } from "../../shared/protocol.js";
 export interface PlaybackRead {
   track: Track | null;
   positionMs: number;
+  mediaPositionMs?: number;
   playing: boolean;
   rate: number;
   volume: number | null;
@@ -59,9 +60,9 @@ export class ReportGate {
         const changedRecording = !sameRecording;
         // The bar and watch URL can update before the actual playback media.
         // Never pair a new song's lyrics with the outgoing song's currentTime.
+        const actualMediaMs = read.mediaPositionMs ?? read.positionMs;
         const playbackRestarted =
-          read.positionMs <= 10000 ||
-          read.positionMs < this.lastPositionMs - 3000;
+          actualMediaMs <= 10000 || actualMediaMs < this.lastPositionMs - 3000;
         const sameMetadata =
           this.lastTrack.title === acceptedTrack.title &&
           this.lastTrack.artist === acceptedTrack.artist;
@@ -76,14 +77,22 @@ export class ReportGate {
           return null;
       }
       const changedRecording = !!this.lastTrack && !sameRecording;
+      // If the player bar still shows the outgoing clock at the instant the
+      // new media starts, publish the fresh media clock until the bar catches up.
+      const positionMs =
+        changedRecording &&
+        read.mediaPositionMs !== undefined &&
+        Math.abs(read.positionMs - read.mediaPositionMs) > 2000
+          ? read.mediaPositionMs
+          : read.positionMs;
       this.pendingTrack = "";
       this.lastTrack = acceptedTrack;
-      this.lastPositionMs = read.positionMs;
+      this.lastPositionMs = read.mediaPositionMs ?? read.positionMs;
       this.emptySince = null;
       return {
         type: "SOURCE_STATE",
         track: acceptedTrack,
-        positionMs: read.positionMs,
+        positionMs,
         playing: read.playing,
         ended: false,
         rate: read.rate,

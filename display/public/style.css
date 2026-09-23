@@ -241,6 +241,13 @@ header {
   accent-color: #fff;
   touch-action: auto;
 }
+.volume-level {
+  min-width: 34px;
+  margin-left: 9px;
+  color: rgba(255, 255, 255, 0.7);
+  font-size: 13px;
+  text-align: right;
+}
 #controls.visible {
   opacity: 1;
   visibility: visible;

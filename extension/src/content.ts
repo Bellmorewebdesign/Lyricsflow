@@ -1,6 +1,7 @@
 import type { Command } from "../../shared/protocol.js";
 import {
   PlayerDurationTracker,
+  PlayerPositionTracker,
   readPlayerMetadata,
   readTrack,
 } from "./metadata.js";
@@ -27,6 +28,7 @@ const $ = (selector: string): HTMLElement | null =>
   document.querySelector(selector);
 const gate = new ReportGate();
 const durations = new PlayerDurationTracker();
+const positions = new PlayerPositionTracker();
 function noteTransition(bar: Element | null, videoId: string): void {
   const metadata = readPlayerMetadata(bar);
   const identity = metadata
@@ -37,8 +39,10 @@ function noteTransition(bar: Element | null, videoId: string): void {
     (identity && lastBarIdentity && identity !== lastBarIdentity) ||
     (videoId && lastVideoId && videoId !== lastVideoId) ||
     (src && lastMediaSrc && src !== lastMediaSrc)
-  )
+  ) {
     volumes.beginTransition();
+    positions.beginTransition(Date.now());
+  }
   if (identity) lastBarIdentity = identity;
   if (videoId) lastVideoId = videoId;
   if (src) lastMediaSrc = src;
@@ -123,17 +127,22 @@ function report(seek = false, force = false): void {
     Date.now(),
   );
   const track = readTrack(bar, duration, videoId || undefined);
-  const positionMs =
+  const mediaPositionMs =
     media && Number.isFinite(media.currentTime)
       ? Math.max(0, Math.round(media.currentTime * 1000))
       : 0;
+  const playing = !!media && !media.paused && !media.ended;
+  const positionMs = media
+    ? positions.resolve(bar, mediaPositionMs, playing, Date.now(), seek)
+    : mediaPositionMs;
   const titlePresent = !!bar?.querySelector(".title")?.textContent?.trim();
   const bylinePresent = !!bar?.querySelector(".byline")?.textContent?.trim();
   const state = gate.accept(
     {
       track,
       positionMs,
-      playing: !!media && !media.paused && !media.ended,
+      mediaPositionMs,
+      playing,
       rate: media?.playbackRate || 1,
       ...(volumes.observe(media) || { volume: null, muted: null }),
       seek,

@@ -12,7 +12,9 @@ import {
 import {
   parsePlayerMetadata,
   PlayerDurationTracker,
+  PlayerPositionTracker,
   readPlayerDuration,
+  readPlayerPosition,
   readTrack,
 } from "../../extension/src/metadata.js";
 import { ReportGate } from "../../extension/src/report-gate.js";
@@ -183,6 +185,42 @@ test("percentage progress bars cannot invent a 100 second song", () => {
   } as unknown as Element;
   assert.equal(readPlayerDuration(withRealSlider), 187);
 });
+test("lyrics follow the YouTube Music clock when media currentTime drifts", () => {
+  const clock = { textContent: "1:07 / 3:07" };
+  const bar = {
+    querySelector(selector: string) {
+      return selector === ".time-info" ? clock : null;
+    },
+  } as unknown as Element;
+  const tracker = new PlayerPositionTracker();
+  assert.equal(readPlayerPosition(bar), 67000);
+  assert.equal(tracker.resolve(bar, 72000, true, 1000), 67000);
+  clock.textContent = "1:08 / 3:07";
+  assert.equal(tracker.resolve(bar, 73000, true, 2000), 68000);
+  assert.equal(tracker.resolve(bar, 68050, true, 2200), 68050);
+  clock.textContent = "0:00 / 3:07";
+  assert.equal(readPlayerPosition(bar), 0);
+  // A seek must use the new media time if the visible clock has not caught up.
+  assert.equal(tracker.resolve(bar, 101000, true, 2300, true), 101000);
+  assert.equal(tracker.resolve(bar, 102000, true, 5100), 102000);
+  clock.textContent = "live";
+  assert.equal(tracker.resolve(bar, 104000, true, 5200), 104000);
+});
+test("incoming song uses its restarted media clock while the player bar still shows the old song", () => {
+  const clock = { textContent: "2:37 / 3:07" };
+  const bar = {
+    querySelector(selector: string) {
+      return selector === ".time-info" ? clock : null;
+    },
+  } as unknown as Element;
+  const tracker = new PlayerPositionTracker();
+  assert.equal(tracker.resolve(bar, 157000, true, 1000), 157000);
+  tracker.beginTransition(1200);
+  assert.equal(tracker.resolve(bar, 800, true, 1800), 800);
+  assert.equal(tracker.resolve(bar, 1200, true, 2200), 1200);
+  clock.textContent = "0:03 / 3:22";
+  assert.equal(tracker.resolve(bar, 3100, true, 2800), 3100);
+});
 test("LRCLIB exact album and duration lookup finds a song beyond search limits", async () => {
   const original = globalThis.fetch;
   const urls: URL[] = [];
@@ -224,6 +262,8 @@ test("LRCLIB retries exact duration without album when YouTube album differs", a
     urls.push(url);
     if (url.searchParams.has("album_name"))
       return { ok: false, status: 404 } as Response;
+    if (url.pathname.endsWith("/search"))
+      return { ok: true, json: async () => [] } as Response;
     return {
       ok: true,
       json: async () => ({
@@ -243,8 +283,57 @@ test("LRCLIB retries exact duration without album when YouTube album differs", a
       durationMs: 187000,
     });
     assert.equal(lyrics?.lines[0]?.text, "found");
-    assert.equal(urls.length, 2);
+    assert.ok(urls.length >= 3);
     assert.equal(urls[1]?.searchParams.has("album_name"), false);
+  } finally {
+    globalThis.fetch = original;
+  }
+});
+test("matching album recording beats a same-title alternate release", async () => {
+  const original = globalThis.fetch;
+  globalThis.fetch = async (input) => {
+    const url = new URL(String(input));
+    if (url.pathname.endsWith("/get") && url.searchParams.has("album_name"))
+      return { ok: false, status: 404 } as Response;
+    const record = url.pathname.endsWith("/get")
+      ? {
+          trackName: "Song",
+          artistName: "Artist",
+          albumName: "Extended Edition",
+          duration: 200,
+          syncedLyrics: "[00:03.00]wrong",
+        }
+      : [
+          {
+            trackName: "Song",
+            artistName: "Artist",
+            albumName: "Original Album",
+            duration: 200,
+            syncedLyrics: "[00:03.00]right",
+          },
+        ];
+    return { ok: true, json: async () => record } as Response;
+  };
+  try {
+    const lyrics = await new LrclibProvider(false).getSyncedLyrics({
+      title: "Song",
+      artist: "Artist",
+      album: "Original Album",
+      durationMs: 200000,
+    });
+    assert.equal(lyrics?.lines[0]?.text, "right");
+    assert.equal(
+      assessMatch(
+        { title: "Song", artist: "Artist", durationMs: 200000 },
+        {
+          trackName: "Song",
+          artistName: "Artist",
+          duration: 200,
+          syncedLyrics: "[03:23.00]impossible",
+        },
+      ).reason,
+      "lyrics run past track end",
+    );
   } finally {
     globalThis.fetch = original;
   }
@@ -333,7 +422,9 @@ test("autoplay waits for the new media clock and does not attach a new URL to ol
   assert.equal(gate.accept(read("Song B", "b", 182000), 500), null);
   assert.equal(gate.accept(read("Song B", "b", 184000), 1400), null);
   assert.equal(store.snapshot.lyrics?.lines[0]?.text, "end of A");
-  const switched = gate.accept(read("Song B", "b", 1200), 1650)!;
+  const next = read("Song B", "b", 0);
+  next.positionMs = 67000; // stale player bar when the new media starts
+  const switched = gate.accept({ ...next, mediaPositionMs: 1200 }, 1650)!;
   assert.equal(switched.track?.title, "Song B");
   assert.equal(switched.positionMs, 1200);
   assert.equal(switched.seek, true);
@@ -737,8 +828,31 @@ test("message validation rejects malformed and unknown commands", () => {
     ),
     { type: "HELLO", role: "source", protocol: 3, build: "1.0.5" },
   );
+  assert.equal(
+    parseIncoming(
+      JSON.stringify({ type: "HELLO", role: "volume", protocol: 3 }),
+    )?.type,
+    "HELLO",
+  );
 });
 test("volume protocol accepts only finite unit values and short nonempty ids", () => {
+  assert.deepEqual(
+    parseIncoming(
+      JSON.stringify({
+        type: "MASTER_VOLUME_STATE",
+        volume: 0.92,
+        muted: false,
+      }),
+    ),
+    { type: "MASTER_VOLUME_STATE", volume: 0.92, muted: false },
+  );
+  for (const volume of [-1, 1.01, "0.5", null])
+    assert.equal(
+      parseIncoming(
+        JSON.stringify({ type: "MASTER_VOLUME_STATE", volume, muted: false }),
+      ),
+      null,
+    );
   for (const volume of [-0.01, 1.01, null, "0.5", Infinity, NaN])
     assert.equal(
       parseIncoming(JSON.stringify({ type: "SET_VOLUME", volume, id: "v" })),
@@ -914,7 +1028,7 @@ test("media selection retains the real player over transient preload media", () 
   Object.assign(old, { paused: true });
   assert.equal(chooseMedia([preload, old, next], old, null), next);
 });
-test("Atlas publishes only reported media volume; changes do not reset lyrics", () => {
+test("Atlas publishes only Windows master volume; source changes cannot overwrite it", () => {
   const store = new StateStore();
   store.connect();
   const first = {
@@ -932,10 +1046,18 @@ test("Atlas publishes only reported media volume; changes do not reset lyrics", 
     provider: "test",
     lines: [{ startMs: 0, text: "line" }],
   });
-  assert.equal(store.snapshot.volume, 0.37);
+  assert.equal(store.snapshot.volume, null);
+  store.setMasterVolume({
+    type: "MASTER_VOLUME_STATE",
+    volume: 0.92,
+    muted: false,
+  });
+  assert.equal(store.snapshot.volume, 0.92);
   assert.equal(store.update({ ...first, volume: 0.65, muted: true }), false);
-  assert.equal(store.snapshot.volume, 0.65);
-  assert.equal(store.snapshot.muted, true);
+  assert.equal(store.snapshot.volume, 0.92);
+  assert.equal(store.snapshot.muted, false);
+  store.setMasterVolume(null);
+  assert.equal(store.snapshot.volume, null);
   assert.equal(
     displayState(store.snapshot, true, Date.now(), null, Date.now()),
     "PLAYING",
@@ -952,13 +1074,16 @@ test("slider bounds drag traffic and sends the exact final value", async () => {
   assert.deepEqual(values, [0]);
   sender.finish(0.37);
   assert.deepEqual(values, [0, 0.37]);
+  sender.finish(1); // Galaxy cannot command Windows above 75%
+  assert.deepEqual(values, [0, 0.37, 0.75]);
   await new Promise((resolve) => setTimeout(resolve, 170));
-  assert.deepEqual(values, [0, 0.37]);
+  assert.deepEqual(values, [0, 0.37, 0.75]);
 });
 test("Galaxy volume changes require a trusted gesture; snapshots and reconnect never send", () => {
   class Input extends EventTarget {
     value = "100";
     disabled = false;
+    nextElementSibling = { textContent: "" };
     parentElement = { classList: { toggle() {} } };
     setAttribute(_key: string, _value: string): void {}
   }
@@ -1005,7 +1130,11 @@ test("Galaxy volume changes require a trusted gesture; snapshots and reconnect n
   fire("mousedown", undefined, true);
   fire("input", 100, true);
   fire("mouseup", undefined, true);
-  assert.equal(commands[commands.length - 1], 1);
+  assert.equal(commands[commands.length - 1], 0.75);
+  slider.receive(0.75, false, true);
+  slider.receive(0.92, false, true); // desktop can exceed Galaxy cap
+  assert.equal(input.value, "75");
+  assert.equal(input.nextElementSibling.textContent, "92%");
   slider.receive(null, null, false);
   assert.equal(input.disabled, true);
   fire("mousedown", undefined, true);

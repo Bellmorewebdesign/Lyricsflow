@@ -117,8 +117,19 @@ export function assessMatch(
       : 0;
   if (track.durationMs > 0 && difference > 3)
     return { score: -1, reason: "duration mismatch" };
+  if (
+    track.durationMs > 0 &&
+    parseLrc(item.syncedLyrics).some(
+      (line) => line.startMs > track.durationMs + 2000,
+    )
+  )
+    return { score: -1, reason: "lyrics run past track end" };
+  const sameAlbum =
+    !!track.album &&
+    !!item.albumName &&
+    normalize(track.album) === normalize(item.albumName);
   return {
-    score: (fullArtistMatch ? 110 : 100) - difference,
+    score: (fullArtistMatch ? 110 : 100) + (sameAlbum ? 6 : 0) - difference,
     reason: "accepted",
   };
 }
@@ -144,6 +155,7 @@ export class LrclibProvider implements LyricsProvider {
         `LRCLIB query: ${JSON.stringify(queryTitle)} — ${JSON.stringify(queryArtist)} [${(track.durationMs / 1000).toFixed(1)}s]`,
       );
     const candidates: Result[] = [];
+    let exactFallback: Lyrics | null = null;
     let searchError: unknown = null;
     // LRCLIB search is capped at 20 records. Try the specific get endpoint
     // with album and duration first, then a focused keyword search.
@@ -160,7 +172,14 @@ export class LrclibProvider implements LyricsProvider {
           const exact = await this.getExact(params);
           if (exact) {
             const result = this.select(track, [exact]);
-            if (result) return result;
+            if (result) {
+              if (
+                !track.album ||
+                normalize(exact.albumName || "") === normalize(track.album)
+              )
+                return result;
+              exactFallback = result;
+            }
           }
         } catch (error) {
           searchError = error;
@@ -213,15 +232,22 @@ export class LrclibProvider implements LyricsProvider {
       candidates.push(...results);
       // With a confirmed length, local title/artist/duration scoring is safe.
       if (track.durationMs > 0) {
-        const matched = this.select(track, results);
+        const preferred = track.album
+          ? results.filter(
+              (item) =>
+                normalize(item.albumName || "") ===
+                normalize(track.album || ""),
+            )
+          : results;
+        const matched = this.select(track, preferred);
         if (matched) return matched;
       }
     }
     // An incomplete set of searches must not be cached as a definitive miss.
     if (!track.durationMs && searchError) throw searchError;
     const matched = this.select(track, candidates);
-    if (!matched && searchError) throw searchError;
-    return matched;
+    if (!matched && !exactFallback && searchError) throw searchError;
+    return matched || exactFallback;
   }
   private select(track: Track, items: Result[]): Lyrics | null {
     let ranked = items
@@ -328,7 +354,7 @@ export class LyricsService {
   ) {}
   async get(track: Track): Promise<Lyrics | null> {
     const key = createHash("sha256")
-      .update("lyrics-match-v5\0")
+      .update("lyrics-match-v6\0")
       .update(
         JSON.stringify([
           normalize(track.title),

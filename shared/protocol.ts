@@ -41,9 +41,20 @@ export interface Snapshot {
   updatedAt: number;
   seek?: boolean;
 }
+export interface MasterVolumeState {
+  type: "MASTER_VOLUME_STATE";
+  volume: number;
+  muted: boolean;
+}
 export type Incoming =
-  | { type: "HELLO"; role: "source" | "display"; protocol: 3; build?: string }
+  | {
+      type: "HELLO";
+      role: "source" | "display" | "volume";
+      protocol: 3;
+      build?: string;
+    }
   | SourceState
+  | MasterVolumeState
   | { type: "CONTROL_COMMAND"; command: Command; id: string }
   | { type: "SET_VOLUME"; volume: number; id: string }
   | { type: "CONTROL_ACK"; id: string; delivered: boolean }
@@ -72,7 +83,7 @@ export function parseIncoming(raw: string): Incoming | null {
   if (
     v.type === "HELLO" &&
     v.protocol === PROTOCOL_VERSION &&
-    (v.role === "source" || v.role === "display")
+    (v.role === "source" || v.role === "display" || v.role === "volume")
   )
     return {
       type: "HELLO",
@@ -85,6 +96,12 @@ export function parseIncoming(raw: string): Incoming | null {
         : {}),
     };
   if (v.type === "PING") return { type: "PING" };
+  if (
+    v.type === "MASTER_VOLUME_STATE" &&
+    number(v.volume, 1) &&
+    typeof v.muted === "boolean"
+  )
+    return { type: "MASTER_VOLUME_STATE", volume: v.volume, muted: v.muted };
   if (v.type === "CONTROL_ACK" && id(v.id) && typeof v.delivered === "boolean")
     return { type: "CONTROL_ACK", id: v.id, delivered: v.delivered };
   if (

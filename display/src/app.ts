@@ -155,11 +155,7 @@ function receive(next: Snapshot): void {
   if (next.sourceConnected) disconnectedAt = null;
   snapshot = next;
   receipt = now;
-  volumeSlider.receive(
-    next.volume,
-    next.muted,
-    connected && next.sourceConnected && !!next.track,
-  );
+  volumeSlider.receive(next.volume, next.muted, connected);
   playButton.setAttribute("aria-label", next.playing ? "Pause" : "Play");
   playButton.innerHTML = next.playing
     ? '<svg viewBox="0 0 32 32"><path d="M9 6h5v20H9zm9 0h5v20h-5z"/></svg>'
@@ -219,7 +215,9 @@ function reveal(): void {
 function sendVolume(value: number): string | null {
   if (socket?.readyState !== WebSocket.OPEN) return null;
   const id = String(Date.now()) + "-" + Math.random().toString(36).slice(2);
-  socket.send(JSON.stringify({ type: "SET_VOLUME", volume: value, id }));
+  socket.send(
+    JSON.stringify({ type: "SET_VOLUME", volume: Math.min(0.75, value), id }),
+  );
   return id;
 }
 volumeSlider = new VolumeSlider(volumeEl, sendVolume, reveal);

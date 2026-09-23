@@ -2,6 +2,7 @@ import type {
   Lyrics,
   Snapshot,
   SourceState,
+  MasterVolumeState,
   Track,
 } from "../../shared/protocol.js";
 export function identity(track: Track | null): string {
@@ -15,6 +16,7 @@ export function identity(track: Track | null): string {
     : "";
 }
 export class StateStore {
+  private master: MasterVolumeState | null = null;
   private current: Snapshot = {
     type: "SERVER_STATE",
     version: 0,
@@ -32,6 +34,10 @@ export class StateStore {
     const s = this.current;
     return {
       ...s,
+      // The tablet shows only Windows master volume. Browser media reports
+      // must never overwrite it or become a substitute when the agent leaves.
+      volume: this.master?.volume ?? null,
+      muted: this.master?.muted ?? null,
       positionMs: s.playing
         ? Math.min(
             s.track?.durationMs || Infinity,
@@ -40,6 +46,9 @@ export class StateStore {
         : s.positionMs,
       updatedAt: Date.now(),
     };
+  }
+  setMasterVolume(state: MasterVolumeState | null): void {
+    this.master = state;
   }
   connect(): void {
     this.current = {

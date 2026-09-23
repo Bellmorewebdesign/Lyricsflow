@@ -11,7 +11,7 @@ const child = spawn(process.execPath, ["dist/server/index.js"], {
   },
   stdio: "pipe",
 });
-let display, source;
+let display, source, volumeAgent;
 const waitFor = (ws, predicate) =>
   new Promise((resolve, reject) => {
     const timeout = setTimeout(() => {
@@ -54,6 +54,7 @@ try {
     html.includes('id="cover-title"') &&
       html.includes('id="cover"') &&
       html.includes('id="volume"') &&
+      html.includes('max="75"') &&
       html.includes("disabled"),
     "artwork-only track view exists",
   );
@@ -62,6 +63,10 @@ try {
   display.send(JSON.stringify({ type: "HELLO", role: "display", protocol: 3 }));
   source = await open(`ws://127.0.0.1:${port}/ws`);
   source.send(JSON.stringify({ type: "HELLO", role: "source", protocol: 3 }));
+  volumeAgent = await open(`ws://127.0.0.1:${port}/ws`);
+  volumeAgent.send(
+    JSON.stringify({ type: "HELLO", role: "volume", protocol: 3 }),
+  );
   const state = {
     type: "SOURCE_STATE",
     track: {
@@ -91,7 +96,16 @@ try {
   const snap = await lyricsResult;
   assert.equal(snap.positionMs >= 55000, true);
   assert.ok(snap.lyrics.lines.length);
-  assert.equal(snap.volume, 0.37);
+  // Music metadata and Windows output volume are independent sources.
+  const confirmedMaster = waitFor(
+    display,
+    (msg) => msg.type === "SERVER_STATE" && msg.volume === 0.37,
+  );
+  volumeAgent.send(
+    JSON.stringify({ type: "MASTER_VOLUME_STATE", volume: 0.37, muted: false }),
+  );
+  const master = await confirmedMaster;
+  assert.equal(master.volume, 0.37);
   assert.equal(
     unsolicitedVolumeCommand,
     false,
@@ -115,18 +129,21 @@ try {
   );
   assert.equal((await ack).delivered, true);
   const volumeCommand = waitFor(
-    source,
+    volumeAgent,
     (msg) => msg.type === "SET_VOLUME" && msg.id === "volume-smoke",
   );
+  source.on("message", unexpectedCommand);
   display.send(
     JSON.stringify({ type: "SET_VOLUME", volume: 0.65, id: "volume-smoke" }),
   );
   assert.equal((await volumeCommand).volume, 0.65);
+  assert.equal(unsolicitedVolumeCommand, false);
+  source.off("message", unexpectedCommand);
   const volumeAck = waitFor(
     display,
     (msg) => msg.type === "CONTROL_ACK" && msg.id === "volume-smoke",
   );
-  source.send(
+  volumeAgent.send(
     JSON.stringify({
       type: "CONTROL_ACK",
       id: "volume-smoke",
@@ -138,19 +155,47 @@ try {
     display,
     (msg) => msg.type === "SERVER_STATE" && msg.volume === 0.65,
   );
-  source.send(JSON.stringify({ ...state, volume: 0.65 }));
+  volumeAgent.send(
+    JSON.stringify({ type: "MASTER_VOLUME_STATE", volume: 0.65, muted: false }),
+  );
   assert.equal((await volumeState).volume, 0.65);
+  const sourceChangesNothing = waitFor(
+    display,
+    (msg) =>
+      msg.type === "SERVER_STATE" &&
+      msg.positionMs >= 55000 &&
+      msg.volume === 0.65,
+  );
+  source.send(JSON.stringify({ ...state, volume: 1 }));
+  assert.equal((await sourceChangesNothing).volume, 0.65);
+  const desktopLouder = waitFor(
+    display,
+    (msg) => msg.type === "SERVER_STATE" && msg.volume === 0.92,
+  );
+  volumeAgent.send(
+    JSON.stringify({ type: "MASTER_VOLUME_STATE", volume: 0.92, muted: false }),
+  );
+  assert.equal((await desktopLouder).volume, 0.92);
   let invalidForwarded = false;
   const onInvalid = (raw) => {
     if (JSON.parse(raw).type === "SET_VOLUME") invalidForwarded = true;
   };
   source.on("message", onInvalid);
+  volumeAgent.on("message", onInvalid);
   display.send(
     JSON.stringify({ type: "SET_VOLUME", volume: 1.1, id: "invalid" }),
   );
   display.send(
     JSON.stringify({ type: "SET_VOLUME", volume: -0.1, id: "invalid2" }),
   );
+  const capped = waitFor(
+    display,
+    (msg) => msg.type === "CONTROL_ACK" && msg.id === "too-loud",
+  );
+  display.send(
+    JSON.stringify({ type: "SET_VOLUME", volume: 0.76, id: "too-loud" }),
+  );
+  assert.equal((await capped).delivered, false);
   const missing = waitFor(
     display,
     (msg) =>
@@ -172,6 +217,21 @@ try {
   assert.equal((await missing).track.artist, "Ensemble");
   assert.equal(invalidForwarded, false);
   source.off("message", onInvalid);
+  volumeAgent.off("message", onInvalid);
+  const masterGone = waitFor(
+    display,
+    (msg) => msg.type === "SERVER_STATE" && msg.track && msg.volume === null,
+  );
+  volumeAgent.close();
+  await masterGone;
+  const noFallback = waitFor(
+    display,
+    (msg) => msg.type === "CONTROL_ACK" && msg.id === "offline",
+  );
+  display.send(
+    JSON.stringify({ type: "SET_VOLUME", volume: 0.5, id: "offline" }),
+  );
+  assert.equal((await noFallback).delivered, false);
   assert.equal(
     child.exitCode,
     null,
@@ -195,6 +255,7 @@ try {
 } finally {
   display?.terminate();
   source?.terminate();
+  volumeAgent?.terminate();
   if (child.exitCode === null && child.signalCode === null)
     child.kill("SIGKILL");
 }
