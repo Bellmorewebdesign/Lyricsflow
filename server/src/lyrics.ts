@@ -78,6 +78,7 @@ export function parseLrc(raw: string): Line[] {
     .filter((l, i, arr) => i === 0 || l.startMs !== arr[i - 1]?.startMs);
 }
 export interface Result {
+  id?: number;
   trackName: string;
   artistName: string;
   albumName?: string;
@@ -136,6 +137,69 @@ export function assessMatch(
 export function matchScore(track: Track, item: Result): number {
   return assessMatch(track, item).score;
 }
+/** A dense file that stops long before the recording may omit entire verses. */
+function endsEarly(track: Track, item: Result): boolean {
+  if (track.durationMs < 60_000) return false;
+  const lines = parseLrc(item.syncedLyrics || "");
+  return (
+    lines.length >= 12 &&
+    track.durationMs - lines[lines.length - 1]!.startMs >
+      Math.max(25_000, track.durationMs * 0.2)
+  );
+}
+function lineVocabulary(item: Result): Set<string> {
+  return new Set(
+    parseLrc(item.syncedLyrics || "")
+      .map((line) =>
+        line.text
+          .normalize("NFKD")
+          .toLowerCase()
+          .replace(/[^a-z0-9]+/g, " ")
+          .trim(),
+      )
+      .filter((line) => line.length >= 8),
+  );
+}
+/** Rescue only a full-length lyric-video transcription corroborated by the
+ * exact artist/title lyric text. The channel name alone never identifies a song.
+ */
+function corroboratedVideo(
+  track: Track,
+  reference: Result,
+  results: Result[],
+): Result | null {
+  if (assessMatch(track, reference).score < 0 || !endsEarly(track, reference))
+    return null;
+  const words = lineVocabulary(reference);
+  if (words.size < 12) return null;
+  const expectedTitle = normalize(`${track.artist} - ${track.title}`);
+  return (
+    results
+      .filter((item) => {
+        if (
+          normalize(item.trackName) !== expectedTitle ||
+          Math.abs(item.duration - track.durationMs / 1000) > 2 ||
+          !item.syncedLyrics
+        )
+          return false;
+        const lines = parseLrc(item.syncedLyrics);
+        if (
+          lines.length < 12 ||
+          lines[lines.length - 1]!.startMs <
+            track.durationMs - Math.max(12_000, track.durationMs * 0.12)
+        )
+          return false;
+        const other = lineVocabulary(item);
+        const shared = [...words].filter((line) => other.has(line)).length;
+        return shared >= 8 && shared >= words.size * 0.35;
+      })
+      .sort(
+        (a, b) =>
+          Math.abs(a.duration - track.durationMs / 1000) -
+          Math.abs(b.duration - track.durationMs / 1000),
+      )[0] || null
+  );
+}
 export interface LyricsProvider {
   name: string;
   getSyncedLyrics(track: Track): Promise<Lyrics | null>;
@@ -156,6 +220,7 @@ export class LrclibProvider implements LyricsProvider {
       );
     const candidates: Result[] = [];
     let exactFallback: Lyrics | null = null;
+    let earlyReference: Result | null = null;
     let searchError: unknown = null;
     // LRCLIB search is capped at 20 records. Try the specific get endpoint
     // with album and duration first, then a focused keyword search.
@@ -171,8 +236,26 @@ export class LrclibProvider implements LyricsProvider {
         try {
           const exact = await this.getExact(params);
           if (exact) {
+            if (
+              endsEarly(track, exact) &&
+              assessMatch(track, exact).score >= 0
+            ) {
+              candidates.push(exact);
+              earlyReference = exact;
+              exactFallback = {
+                provider: this.name,
+                lines: parseLrc(exact.syncedLyrics!),
+              };
+              if (this.debug)
+                console.info(
+                  "LRCLIB exact lyrics end early; checking other synced sources",
+                  exact.id,
+                );
+              continue;
+            }
             const result = this.select(track, [exact]);
             if (result) {
+              candidates.push(exact);
               if (
                 !track.album ||
                 normalize(exact.albumName || "") === normalize(track.album)
@@ -230,6 +313,12 @@ export class LrclibProvider implements LyricsProvider {
           );
       }
       candidates.push(...results);
+      if (!earlyReference)
+        earlyReference =
+          results.find(
+            (item) =>
+              assessMatch(track, item).score >= 0 && endsEarly(track, item),
+          ) || null;
       // With a confirmed length, local title/artist/duration scoring is safe.
       if (track.durationMs > 0) {
         const preferred = track.album
@@ -239,12 +328,33 @@ export class LrclibProvider implements LyricsProvider {
                 normalize(track.album || ""),
             )
           : results;
-        const matched = this.select(track, preferred);
+        const matched = this.select(
+          track,
+          preferred.filter((item) => !endsEarly(track, item)),
+        );
         if (matched) return matched;
       }
     }
     // An incomplete set of searches must not be cached as a definitive miss.
     if (!track.durationMs && searchError) throw searchError;
+    if (earlyReference) {
+      const complete = this.select(
+        track,
+        candidates.filter((item) => !endsEarly(track, item)),
+      );
+      if (complete) return complete;
+      const alternative = corroboratedVideo(track, earlyReference, candidates);
+      if (alternative) {
+        if (this.debug)
+          console.info(
+            `LRCLIB selected corroborated full timeline: id=${alternative.id ?? "unknown"}, original id=${earlyReference.id ?? "unknown"}`,
+          );
+        return {
+          provider: this.name,
+          lines: parseLrc(alternative.syncedLyrics!),
+        };
+      }
+    }
     const matched = this.select(track, candidates);
     if (!matched && !exactFallback && searchError) throw searchError;
     return matched || exactFallback;
@@ -354,7 +464,7 @@ export class LyricsService {
   ) {}
   async get(track: Track): Promise<Lyrics | null> {
     const key = createHash("sha256")
-      .update("lyrics-match-v6\0")
+      .update("lyrics-match-v7\0")
       .update(
         JSON.stringify([
           normalize(track.title),

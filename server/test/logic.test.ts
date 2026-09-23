@@ -338,6 +338,85 @@ test("matching album recording beats a same-title alternate release", async () =
     globalThis.fetch = original;
   }
 });
+test("a corroborated full lyric-video timeline replaces an early-ending exact match", async () => {
+  const oldFetch = globalThis.fetch;
+  const calls: URL[] = [];
+  const short = Array.from(
+    { length: 24 },
+    (_, i) =>
+      `[${String(Math.floor((i * 4) / 60)).padStart(2, "0")}:${String((i * 4) % 60).padStart(2, "0")}.00] shared phrase ${i}`,
+  ).join("\n");
+  const full = [
+    ...Array.from(
+      { length: 16 },
+      (_, i) =>
+        `[${String(Math.floor((i * 4) / 60)).padStart(2, "0")}:${String((i * 4) % 60).padStart(2, "0")}.00] shared phrase ${i}`,
+    ),
+    ...Array.from(
+      { length: 12 },
+      (_, i) =>
+        `[${String(Math.floor((72 + i * 5) / 60)).padStart(2, "0")}:${String((72 + i * 5) % 60).padStart(2, "0")}.00] later phrase ${i}`,
+    ),
+  ].join("\n");
+  const track = {
+    title: "What You Saying",
+    artist: "Lil Uzi Vert",
+    album: "What You Saying - Single",
+    durationMs: 132000,
+  };
+  const shortResult = {
+    id: 1,
+    trackName: track.title,
+    artistName: track.artist,
+    albumName: track.album,
+    duration: 132,
+    syncedLyrics: short,
+  };
+  const videoResult = {
+    id: 2,
+    trackName: "Lil Uzi Vert - What You Saying",
+    artistName: "Lyric video channel",
+    albumName: "Video uploads",
+    duration: 131.5,
+    syncedLyrics: full,
+  };
+  globalThis.fetch = async (input) => {
+    const url = new URL(String(input));
+    calls.push(url);
+    return {
+      ok: true,
+      json: async () =>
+        url.pathname.endsWith("/get")
+          ? shortResult
+          : [shortResult, videoResult],
+    } as Response;
+  };
+  try {
+    const lyrics = await new LrclibProvider(false).getSyncedLyrics(track);
+    assert.equal(lyrics?.lines.at(-1)?.startMs, 127000);
+    assert.ok(calls.some((call) => call.pathname.endsWith("/search")));
+    // The other credited artist is accepted only with strong evidence.
+    const unrelated = {
+      ...videoResult,
+      syncedLyrics: full.replace(/shared phrase/g, "different words"),
+    };
+    globalThis.fetch = async (input) =>
+      ({
+        ok: true,
+        json: async () =>
+          new URL(String(input)).pathname.endsWith("/get")
+            ? shortResult
+            : [shortResult, unrelated],
+      }) as Response;
+    assert.equal(
+      (await new LrclibProvider(false).getSyncedLyrics(track))?.lines.at(-1)
+        ?.startMs,
+      92000,
+    );
+  } finally {
+    globalThis.fetch = oldFetch;
+  }
+});
 test("unknown duration uses exact artist and rejects conflicting recordings", async () => {
   const original = globalThis.fetch;
   const records = [
