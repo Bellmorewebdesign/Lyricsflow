@@ -1,10 +1,17 @@
 import type { Command } from "../../shared/protocol.js";
 import { readTrack } from "./metadata.js";
 import { ReportGate } from "./report-gate.js";
-import { observeVolume, readMediaVolume, setMediaVolume } from "./volume.js";
+import {
+  chooseMedia,
+  MediaVolumeTracker,
+  observeVolume,
+  setMediaVolume,
+} from "./volume.js";
 declare const chrome: any;
+declare const __DEBUG_VOLUME__: boolean;
 let media: HTMLMediaElement | null = null;
 let stopVolume: (() => void) | null = null;
+const volumes = new MediaVolumeTracker();
 let lastSignature = "";
 let lastPosition = -1;
 let observerTimer: ReturnType<typeof setTimeout> | null = null;
@@ -12,17 +19,33 @@ const $ = (selector: string): HTMLElement | null =>
   document.querySelector(selector);
 const gate = new ReportGate();
 function findMedia(): void {
-  const next = document.querySelector(
-    "video, audio",
-  ) as HTMLMediaElement | null;
+  const next = chooseMedia(
+    Array.from(document.querySelectorAll<HTMLMediaElement>("video, audio")),
+    media,
+    document.querySelector("ytmusic-player"),
+  );
   if (next === media) return;
+  const before = volumes.known;
+  const after = volumes.replace(next);
+  if (__DEBUG_VOLUME__)
+    console.debug("Media element changed:", {
+      before,
+      after,
+      selected: !!next,
+    });
   stopVolume?.();
   if (media)
     for (const event of events) media.removeEventListener(event, mediaChanged);
   media = next;
   if (media)
     for (const event of events) media.addEventListener(event, mediaChanged);
-  stopVolume = media ? observeVolume(media, () => report(false, true)) : null;
+  stopVolume = media
+    ? observeVolume(media, () => {
+        if (__DEBUG_VOLUME__)
+          console.debug("Media volumechange:", volumes.observe(media));
+        report(false, true);
+      })
+    : null;
   report(true);
 }
 const events = [
@@ -60,7 +83,7 @@ function report(seek = false, force = false): void {
       positionMs,
       playing: !!media && !media.paused && !media.ended,
       rate: media?.playbackRate || 1,
-      ...readMediaVolume(media),
+      ...(volumes.observe(media) || { volume: null, muted: null }),
       seek,
       clearEvidence: !titlePresent && !bylinePresent && (!media || media.ended),
     },
@@ -114,8 +137,15 @@ chrome.runtime.onMessage.addListener(
       });
     if (message?.type === "SET_VOLUME") {
       findMedia();
+      if (__DEBUG_VOLUME__)
+        console.debug("SET_VOLUME requested (Galaxy):", message.volume);
       const delivered = setMediaVolume(media, message.volume);
-      if (delivered) report(false, true);
+      if (delivered) {
+        const applied = volumes.observe(media);
+        if (__DEBUG_VOLUME__)
+          console.debug("SET_VOLUME applied (Galaxy):", applied);
+        report(false, true);
+      }
       respond({ delivered });
     }
   },
@@ -144,6 +174,30 @@ function observeBar(): void {
   report(false, true);
 }
 observeBar();
+// Media can be created outside the player bar. Adopt it as soon as it becomes usable.
+const mediaNode = (node: Node): boolean =>
+  node instanceof HTMLMediaElement ||
+  (node instanceof Element && !!node.querySelector("video, audio"));
+new MutationObserver((changes) => {
+  if (
+    changes.some(
+      (change) =>
+        (change.type === "attributes" &&
+          (change.target instanceof HTMLMediaElement ||
+            change.target.parentElement instanceof HTMLMediaElement)) ||
+        Array.from(change.addedNodes).some(mediaNode) ||
+        Array.from(change.removedNodes).some(mediaNode),
+    )
+  )
+    findMedia();
+}).observe(document.documentElement, {
+  childList: true,
+  subtree: true,
+  attributes: true,
+  attributeFilter: ["src"],
+});
+document.addEventListener("loadedmetadata", findMedia, true);
+document.addEventListener("play", findMedia, true);
 // YT Music is an SPA. This also finds replacement media elements and corrects drift.
 setInterval(() => {
   findMedia();

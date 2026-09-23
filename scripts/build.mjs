@@ -32,6 +32,9 @@ await build({
   ],
   bundle: true,
   target: "chrome110",
+  define: {
+    __DEBUG_VOLUME__: JSON.stringify(process.env.DEBUG_VOLUME === "true"),
+  },
   outdir: "dist/extension",
 });
 await cp("display/public", "dist/display", { recursive: true });

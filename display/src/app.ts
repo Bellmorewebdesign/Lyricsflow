@@ -4,7 +4,7 @@ import {
   type Command,
 } from "../../shared/protocol.js";
 import { ArtworkView, showTrackMetadata } from "./artwork.js";
-import { VolumeThrottle } from "./volume.js";
+import { VolumeSlider } from "./volume.js";
 import {
   displayState,
   effectivePosition,
@@ -36,9 +36,7 @@ let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
 let renderTimer: ReturnType<typeof setTimeout> | null = null;
 let standbyTimer: ReturnType<typeof setTimeout> | null = null;
 let controlsTimer: ReturnType<typeof setTimeout> | null = null;
-let volumeTimer: ReturnType<typeof setTimeout> | null = null;
-let volumeDragging = false;
-let volumePending: { value: number; id: string } | null = null;
+let volumeSlider: VolumeSlider;
 let disconnectedAt: number | null = null;
 let pausedAt: number | null = null;
 let lastActive = 0;
@@ -157,7 +155,11 @@ function receive(next: Snapshot): void {
   if (next.sourceConnected) disconnectedAt = null;
   snapshot = next;
   receipt = now;
-  syncVolume();
+  volumeSlider.receive(
+    next.volume,
+    next.muted,
+    connected && next.sourceConnected && !!next.track,
+  );
   playButton.setAttribute("aria-label", next.playing ? "Pause" : "Play");
   playButton.innerHTML = next.playing
     ? '<svg viewBox="0 0 32 32"><path d="M9 6h5v20H9zm9 0h5v20h-5z"/></svg>'
@@ -192,19 +194,14 @@ function connect(): void {
       return;
     }
     if (msg.type === "SERVER_STATE") receive(msg as Snapshot);
-    if (
-      msg.type === "CONTROL_ACK" &&
-      volumePending?.id === msg.id &&
-      !msg.delivered
-    ) {
-      volumePending = null;
-      syncVolume();
-    }
+    if (msg.type === "CONTROL_ACK")
+      volumeSlider.acknowledge(msg.id, msg.delivered);
   };
   ws.onclose = () => {
     if (socket !== ws) return;
     connected = false;
     disconnectedAt = Date.now();
+    volumeSlider.receive(null, null, false);
     render();
     reconnectTimer = setTimeout(connect, reconnectDelay + Math.random() * 500);
     reconnectDelay = Math.min(30000, reconnectDelay * 2);
@@ -215,65 +212,17 @@ function reveal(): void {
   controls.classList.add("visible");
   if (controlsTimer) clearTimeout(controlsTimer);
   controlsTimer = setTimeout(() => {
-    if (volumeDragging) reveal();
+    if (volumeSlider.interacting) reveal();
     else controls.classList.remove("visible");
   }, 4500);
 }
-function syncVolume(): void {
-  if (!snapshot || volumeDragging || !Number.isFinite(snapshot.volume)) return;
-  if (volumePending) {
-    if (Math.abs(snapshot.volume - volumePending.value) > 0.005) return;
-    volumePending = null;
-    if (volumeTimer) clearTimeout(volumeTimer);
-  }
-  volumeEl.value = String(Math.round(snapshot.volume * 100));
-  volumeEl.setAttribute(
-    "aria-valuetext",
-    Math.round(snapshot.volume * 100) + "%",
-  );
-  volumeEl.parentElement?.classList.toggle("muted", snapshot.muted);
-}
-function sendVolume(value: number): void {
-  if (socket?.readyState !== WebSocket.OPEN) return;
+function sendVolume(value: number): string | null {
+  if (socket?.readyState !== WebSocket.OPEN) return null;
   const id = String(Date.now()) + "-" + Math.random().toString(36).slice(2);
-  volumePending = { value, id };
   socket.send(JSON.stringify({ type: "SET_VOLUME", volume: value, id }));
-  if (volumeTimer) clearTimeout(volumeTimer);
-  volumeTimer = setTimeout(() => {
-    volumePending = null;
-    syncVolume();
-  }, 2500);
+  return id;
 }
-const volumeThrottle = new VolumeThrottle(sendVolume);
-function finishVolume(): void {
-  if (!volumeDragging) return;
-  volumeDragging = false;
-  volumeThrottle.finish(Number(volumeEl.value) / 100);
-  reveal();
-  if (!volumePending) syncVolume();
-}
-volumeEl.addEventListener("touchstart", () => {
-  volumeDragging = true;
-  reveal();
-});
-volumeEl.addEventListener("mousedown", () => {
-  volumeDragging = true;
-  reveal();
-});
-volumeEl.addEventListener("touchend", finishVolume);
-volumeEl.addEventListener("touchcancel", finishVolume);
-volumeEl.addEventListener("mouseup", finishVolume);
-volumeEl.addEventListener("blur", finishVolume);
-volumeEl.addEventListener("input", () => {
-  volumeDragging = true;
-  reveal();
-  volumeThrottle.input(Number(volumeEl.value) / 100);
-});
-volumeEl.addEventListener("change", () => {
-  volumeDragging = false;
-  volumeThrottle.finish(Number(volumeEl.value) / 100);
-  reveal();
-});
+volumeSlider = new VolumeSlider(volumeEl, sendVolume, reveal);
 document.body.addEventListener("click", reveal);
 controls.addEventListener("click", (event) => event.stopPropagation());
 for (const button of Array.from(

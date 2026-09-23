@@ -1,4 +1,4 @@
-export const PROTOCOL_VERSION = 2;
+export const PROTOCOL_VERSION = 3;
 export type Command = "PREVIOUS" | "PLAY_PAUSE" | "NEXT";
 export interface Track {
   title: string;
@@ -23,8 +23,8 @@ export interface SourceState {
   playing: boolean;
   ended: boolean;
   rate: number;
-  volume: number;
-  muted: boolean;
+  volume: number | null;
+  muted: boolean | null;
   seek?: boolean;
 }
 export interface Snapshot {
@@ -34,15 +34,15 @@ export interface Snapshot {
   positionMs: number;
   playing: boolean;
   rate: number;
-  volume: number;
-  muted: boolean;
+  volume: number | null;
+  muted: boolean | null;
   lyrics: Lyrics | null;
   sourceConnected: boolean;
   updatedAt: number;
   seek?: boolean;
 }
 export type Incoming =
-  | { type: "HELLO"; role: "source" | "display"; protocol: 2 }
+  | { type: "HELLO"; role: "source" | "display"; protocol: 3 }
   | SourceState
   | { type: "CONTROL_COMMAND"; command: Command; id: string }
   | { type: "SET_VOLUME"; volume: number; id: string }
@@ -95,8 +95,10 @@ export function parseIncoming(raw: string): Incoming | null {
     typeof v.ended === "boolean" &&
     number(v.rate, 8) &&
     v.rate > 0 &&
-    number(v.volume, 1) &&
-    typeof v.muted === "boolean" &&
+    (v.volume === null || number(v.volume, 1)) &&
+    (v.muted === null || typeof v.muted === "boolean") &&
+    ((v.volume === null && v.muted === null) ||
+      (v.volume !== null && v.muted !== null)) &&
     (v.seek === undefined || typeof v.seek === "boolean")
   ) {
     if (v.track === null)

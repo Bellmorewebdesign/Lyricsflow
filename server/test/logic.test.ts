@@ -12,6 +12,8 @@ import {
 import { parsePlayerMetadata } from "../../extension/src/metadata.js";
 import { ReportGate } from "../../extension/src/report-gate.js";
 import {
+  chooseMedia,
+  MediaVolumeTracker,
   observeVolume,
   readMediaVolume,
   setMediaVolume,
@@ -24,7 +26,7 @@ import {
   lineIndex,
 } from "../../display/src/model.js";
 import { ArtworkView, showTrackMetadata } from "../../display/src/artwork.js";
-import { VolumeThrottle } from "../../display/src/volume.js";
+import { VolumeSlider, VolumeThrottle } from "../../display/src/volume.js";
 const track = {
   title: "Song (Official Video)",
   artist: "The Band feat. Guest",
@@ -255,9 +257,15 @@ test("message validation rejects malformed and unknown commands", () => {
   );
   assert.equal(
     parseIncoming(
-      JSON.stringify({ type: "HELLO", role: "display", protocol: 2 }),
+      JSON.stringify({ type: "HELLO", role: "display", protocol: 3 }),
     )?.type,
     "HELLO",
+  );
+  assert.equal(
+    parseIncoming(
+      JSON.stringify({ type: "HELLO", role: "display", protocol: 2 }),
+    ),
+    null,
   );
 });
 test("volume protocol accepts only finite unit values and short nonempty ids", () => {
@@ -282,7 +290,7 @@ test("volume protocol accepts only finite unit values and short nonempty ids", (
     ),
     { type: "SET_VOLUME", volume: 0.37, id: "v" },
   );
-  for (const volume of [-1, 2, null])
+  for (const volume of [-1, 2])
     assert.equal(
       parseIncoming(
         JSON.stringify({
@@ -298,15 +306,54 @@ test("volume protocol accepts only finite unit values and short nonempty ids", (
       ),
       null,
     );
+  assert.equal(
+    parseIncoming(
+      JSON.stringify({
+        type: "SOURCE_STATE",
+        track: null,
+        positionMs: 0,
+        playing: false,
+        ended: true,
+        rate: 1,
+        volume: null,
+        muted: null,
+      }),
+    )?.type,
+    "SOURCE_STATE",
+  );
+  assert.equal(
+    parseIncoming(
+      JSON.stringify({
+        type: "SOURCE_STATE",
+        track: null,
+        positionMs: 0,
+        playing: false,
+        ended: true,
+        rate: 1,
+        volume: null,
+        muted: false,
+      }),
+    ),
+    null,
+  );
 });
 test("media volume reports desktop changes and unmute on positive tablet input", () => {
   const media = new EventTarget() as HTMLMediaElement;
   media.volume = 0.37;
   media.muted = true;
+  Object.assign(media, {
+    isConnected: true,
+    duration: 120,
+    currentSrc: "song",
+    paused: false,
+    ended: false,
+    readyState: 4,
+  });
   const observed: { volume: number; muted: boolean }[] = [];
-  const stop = observeVolume(media, () =>
-    observed.push(readMediaVolume(media)),
-  );
+  const stop = observeVolume(media, () => {
+    const volume = readMediaVolume(media);
+    if (volume) observed.push(volume);
+  });
   media.volume = 0.42;
   media.dispatchEvent(new Event("volumechange"));
   assert.deepEqual(observed, [{ volume: 0.42, muted: true }]);
@@ -319,6 +366,59 @@ test("media volume reports desktop changes and unmute on positive tablet input",
   stop();
   media.dispatchEvent(new Event("volumechange"));
   assert.equal(observed.length, 1);
+});
+test("unknown media preserves prior observed volume and never assumes maximum", () => {
+  const tracker = new MediaVolumeTracker();
+  assert.equal(readMediaVolume(null), null);
+  assert.equal(tracker.observe(null), null);
+  const old = { volume: 0.31, muted: false } as HTMLMediaElement;
+  assert.deepEqual(tracker.observe(old), { volume: 0.31, muted: false });
+  assert.deepEqual(tracker.replace(null), { volume: 0.31, muted: false });
+  assert.deepEqual(tracker.observe(null), { volume: 0.31, muted: false });
+  assert.equal(setMediaVolume(null, 1), false);
+});
+test("media replacement restores prior volume before adopting a fresh default", () => {
+  const tracker = new MediaVolumeTracker();
+  const old = { volume: 0.42, muted: true } as HTMLMediaElement;
+  const next = { volume: 1, muted: false } as HTMLMediaElement;
+  tracker.observe(old);
+  Object.assign(old, { volume: 1 }); // detached element resetting cannot erase 0.42
+  assert.deepEqual(tracker.replace(next), { volume: 0.42, muted: true });
+  assert.equal(next.volume, 0.42);
+  assert.equal(next.muted, true);
+  const desktopChanged = { volume: 0.28, muted: false } as HTMLMediaElement;
+  tracker.replace(desktopChanged);
+  assert.deepEqual(tracker.known, { volume: 0.28, muted: false });
+});
+test("media selection retains the real player over transient preload media", () => {
+  const old = {
+    isConnected: true,
+    paused: false,
+    ended: false,
+    duration: 120,
+    currentSrc: "song-a",
+    readyState: 4,
+  } as HTMLMediaElement;
+  const preload = {
+    isConnected: true,
+    paused: true,
+    ended: false,
+    duration: NaN,
+    currentSrc: "",
+    readyState: 0,
+  } as HTMLMediaElement;
+  assert.equal(chooseMedia([preload, old], old, null), old);
+  assert.equal(chooseMedia([preload], null, null), null);
+  const next = {
+    isConnected: true,
+    paused: false,
+    ended: false,
+    duration: 130,
+    currentSrc: "song-b",
+    readyState: 4,
+  } as HTMLMediaElement;
+  Object.assign(old, { paused: true });
+  assert.equal(chooseMedia([preload, old, next], old, null), next);
 });
 test("Atlas publishes only reported media volume; changes do not reset lyrics", () => {
   const store = new StateStore();
@@ -360,6 +460,69 @@ test("slider bounds drag traffic and sends the exact final value", async () => {
   assert.deepEqual(values, [0, 0.37]);
   await new Promise((resolve) => setTimeout(resolve, 170));
   assert.deepEqual(values, [0, 0.37]);
+});
+test("Galaxy volume changes require a trusted gesture; snapshots and reconnect never send", () => {
+  class Input extends EventTarget {
+    value = "100";
+    disabled = false;
+    parentElement = { classList: { toggle() {} } };
+    setAttribute(_key: string, _value: string): void {}
+  }
+  const input = new Input();
+  const trusted = new WeakSet<Event>();
+  const commands: number[] = [];
+  const slider = new VolumeSlider(
+    input as unknown as HTMLInputElement,
+    (volume) => {
+      commands.push(volume);
+      return String(commands.length);
+    },
+    () => {},
+    (event) => trusted.has(event),
+    input,
+    false,
+  );
+  const fire = (type: string, value?: number, real = false) => {
+    if (value !== undefined) input.value = String(value);
+    const event = new Event(type);
+    if (real) trusted.add(event);
+    input.dispatchEvent(event);
+  };
+  assert.equal(input.disabled, true);
+  assert.equal(input.value, "0");
+  fire("input", 100);
+  fire("change", 100);
+  assert.deepEqual(commands, []);
+  slider.receive(0.28, false, true);
+  assert.equal(input.disabled, false);
+  assert.equal(input.value, "28");
+  fire("input", 100); // synthetic/programmatic change without a gesture
+  fire("mousedown", undefined, false);
+  fire("input", 100, true);
+  assert.deepEqual(commands, []);
+  slider.receive(0.28, false, true);
+  assert.equal(input.value, "28");
+  fire("mousedown", undefined, true);
+  fire("input", 63, true);
+  fire("mouseup", undefined, true);
+  assert.deepEqual(commands, [0.63]);
+  slider.receive(0.63, false, true); // authoritative echo, not a new command
+  assert.equal(input.value, "63");
+  fire("mousedown", undefined, true);
+  fire("input", 100, true);
+  fire("mouseup", undefined, true);
+  assert.equal(commands[commands.length - 1], 1);
+  slider.receive(null, null, false);
+  assert.equal(input.disabled, true);
+  fire("mousedown", undefined, true);
+  fire("input", 100, true);
+  assert.equal(commands.length, 2);
+  slider.receive(0.42, false, true); // reconnect or track change is display-only
+  assert.equal(input.value, "42");
+  assert.equal(commands.length, 2);
+  fire("mousedown", undefined, true);
+  fire("blur"); // blur cancels without setting any volume
+  assert.equal(commands.length, 2);
 });
 test("failed or absent cover fades out while track metadata remains available", () => {
   const makeLayer = () => ({

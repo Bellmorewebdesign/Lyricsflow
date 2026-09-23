@@ -4,8 +4,8 @@ export interface PlaybackRead {
   positionMs: number;
   playing: boolean;
   rate: number;
-  volume: number;
-  muted: boolean;
+  volume: number | null;
+  muted: boolean | null;
   clearEvidence: boolean;
   seek: boolean;
 }

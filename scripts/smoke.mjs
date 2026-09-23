@@ -53,14 +53,15 @@ try {
   assert.ok(
     html.includes('id="cover-title"') &&
       html.includes('id="cover"') &&
-      html.includes('id="volume"'),
+      html.includes('id="volume"') &&
+      html.includes("disabled"),
     "artwork-only track view exists",
   );
   assert.equal((await fetch(`http://127.0.0.1:${port}/simulator`)).status, 200);
   display = await open(`ws://127.0.0.1:${port}/ws`);
-  display.send(JSON.stringify({ type: "HELLO", role: "display", protocol: 2 }));
+  display.send(JSON.stringify({ type: "HELLO", role: "display", protocol: 3 }));
   source = await open(`ws://127.0.0.1:${port}/ws`);
-  source.send(JSON.stringify({ type: "HELLO", role: "source", protocol: 2 }));
+  source.send(JSON.stringify({ type: "HELLO", role: "source", protocol: 3 }));
   const state = {
     type: "SOURCE_STATE",
     track: {
@@ -81,11 +82,22 @@ try {
     (msg) =>
       msg.type === "SERVER_STATE" && msg.lyrics?.provider === "Simulator",
   );
+  let unsolicitedVolumeCommand = false;
+  const unexpectedCommand = (raw) => {
+    if (JSON.parse(raw).type === "SET_VOLUME") unsolicitedVolumeCommand = true;
+  };
+  source.on("message", unexpectedCommand);
   source.send(JSON.stringify(state));
   const snap = await lyricsResult;
   assert.equal(snap.positionMs >= 55000, true);
   assert.ok(snap.lyrics.lines.length);
   assert.equal(snap.volume, 0.37);
+  assert.equal(
+    unsolicitedVolumeCommand,
+    false,
+    "SOURCE_STATE never produces SET_VOLUME",
+  );
+  source.off("message", unexpectedCommand);
   const command = waitFor(
     source,
     (msg) => msg.type === "CONTROL_COMMAND" && msg.command === "NEXT",

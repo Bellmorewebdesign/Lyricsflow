@@ -135,8 +135,8 @@ chrome.runtime.onMessage.addListener((message: any, sender: any) => {
 });
 chrome.tabs.onRemoved.addListener((tabId: number) => {
   if (tabId !== selectedTab) return;
-  const volume = lastState?.volume ?? 1;
-  const muted = lastState?.muted ?? false;
+  const volume = lastState?.volume ?? null;
+  const muted = lastState?.muted ?? null;
   selectedTab = null;
   lastState = null;
   if (socket?.readyState === WebSocket.OPEN)
