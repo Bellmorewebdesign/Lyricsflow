@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { WebSocketServer, WebSocket } from "ws";
 import { parseIncoming, type Outgoing } from "../../shared/protocol.js";
 import { LrclibProvider, LyricsService } from "./lyrics.js";
+import { TrackLyricsLookup } from "./lookup.js";
 import { StateStore } from "./state.js";
 const assets = join(process.cwd(), "dist", "display");
 const host = process.env.HOST || "0.0.0.0";
@@ -34,6 +35,19 @@ const broadcast = () => {
   const snapshot = state.snapshot;
   for (const ws of displays) send(ws, snapshot);
 };
+const lookups = new TrackLyricsLookup(
+  state,
+  (track) => service.get(track),
+  (track, lyrics) => {
+    console.info(
+      lyrics ? "Lyrics found:" : "Lyrics not found:",
+      describeTrack(track),
+    );
+    broadcast();
+  },
+  (track, error) =>
+    console.warn("Lyrics provider error:", describeTrack(track), error),
+);
 const server = createServer(async (req, res) => {
   const path = new URL(req.url || "/", "http://localhost").pathname;
   if (path === "/api/health") {
@@ -126,6 +140,7 @@ wss.on("connection", (ws) => {
         if (source && source !== ws)
           source.close(1000, "Replaced by new source");
         source = ws;
+        lookups.stop();
         state.clear();
         state.connect();
         broadcast();
@@ -141,6 +156,7 @@ wss.on("connection", (ws) => {
       const changed = state.update(msg);
       broadcast();
       if (changed) {
+        lookups.stop();
         const snap = state.snapshot;
         console.info("Track changed:", describeTrack(snap.track));
         if (simulator && snap.track?.videoId?.startsWith("lyricsflow-demo-")) {
@@ -160,25 +176,7 @@ wss.on("connection", (ws) => {
                   })),
                 };
           if (state.setLyrics(snap.version, lyrics)) broadcast();
-        } else if (snap.track)
-          void service
-            .get(snap.track)
-            .then((lyrics) => {
-              if (state.setLyrics(snap.version, lyrics)) {
-                console.info(
-                  lyrics ? "Lyrics found:" : "Lyrics not found:",
-                  describeTrack(snap.track),
-                );
-                broadcast();
-              }
-            })
-            .catch((error) => {
-              console.warn(
-                "Lyrics provider error:",
-                describeTrack(snap.track),
-                error,
-              );
-            });
+        } else if (snap.track) lookups.start(snap.version, snap.track);
       }
     }
     if (
@@ -211,6 +209,7 @@ wss.on("connection", (ws) => {
     alive.delete(ws);
     if (role === "source" && source === ws) {
       source = null;
+      lookups.stop();
       state.disconnect();
       broadcast();
       console.info("Extension disconnected");
@@ -244,6 +243,7 @@ server.listen(port, host, () =>
   console.info(`Lyricsflow listening at http://${host}:${port}/display`),
 );
 process.on("SIGTERM", () => {
+  lookups.stop();
   clearInterval(heartbeat);
   server.close();
   wss.close();

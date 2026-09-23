@@ -139,6 +139,7 @@ export class LrclibProvider implements LyricsProvider {
         `LRCLIB query: ${JSON.stringify(queryTitle)} — ${JSON.stringify(queryArtist)} [${(track.durationMs / 1000).toFixed(1)}s]`,
       );
     let matched: Lyrics | null = null;
+    let searchError: unknown = null;
     const searches: {
       track_name?: string;
       artist_name?: string;
@@ -150,7 +151,19 @@ export class LrclibProvider implements LyricsProvider {
     if (normalize(queryTitle) !== queryTitle.toLowerCase())
       searches.push({ q: normalize(queryTitle) });
     for (const params of searches) {
-      const results = await this.search(params);
+      let results: Result[];
+      try {
+        results = await this.search(params);
+      } catch (error) {
+        searchError = error;
+        if (this.debug)
+          console.info(
+            "LRCLIB search failed:",
+            params,
+            error instanceof Error ? error.message : error,
+          );
+        continue;
+      }
       const ranked = results
         .map((item) => ({ item, ...assessMatch(track, item) }))
         .sort((a, b) => b.score - a.score);
@@ -173,6 +186,8 @@ export class LrclibProvider implements LyricsProvider {
       }
       if (matched) break;
     }
+    // An incomplete set of searches must not be cached as a definitive miss.
+    if (!matched && searchError) throw searchError;
     return matched;
   }
   private async search(params: {
@@ -219,7 +234,7 @@ export class LyricsService {
   ) {}
   async get(track: Track): Promise<Lyrics | null> {
     const key = createHash("sha256")
-      .update("lyrics-match-v2\0")
+      .update("lyrics-match-v3\0")
       .update(
         JSON.stringify([
           normalize(track.title),

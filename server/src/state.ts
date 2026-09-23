@@ -9,7 +9,8 @@ export function identity(track: Track | null): string {
     ? JSON.stringify([
         track.title,
         track.artist,
-        Math.round(track.durationMs / 1000),
+        track.videoId || "",
+        track.durationMs > 0,
       ])
     : "";
 }

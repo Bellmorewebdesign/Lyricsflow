@@ -9,7 +9,12 @@ import {
   assessMatch,
   LrclibProvider,
 } from "../src/lyrics.js";
-import { parsePlayerMetadata } from "../../extension/src/metadata.js";
+import {
+  parsePlayerMetadata,
+  PlayerDurationTracker,
+  readPlayerDuration,
+  readTrack,
+} from "../../extension/src/metadata.js";
 import { ReportGate } from "../../extension/src/report-gate.js";
 import {
   chooseMedia,
@@ -19,6 +24,7 @@ import {
   setMediaVolume,
 } from "../../extension/src/volume.js";
 import { StateStore } from "../src/state.js";
+import { TrackLyricsLookup } from "../src/lookup.js";
 import { parseIncoming } from "../../shared/protocol.js";
 import {
   displayState,
@@ -106,9 +112,125 @@ test("incomplete metadata during a player transition never clears a valid track"
   assert.equal(gate.accept(valid(songA), 0)?.track?.title, "Song A");
   assert.equal(gate.accept(invalid, 100), null);
   assert.equal(gate.accept(invalid, 5000), null);
-  assert.equal(gate.accept(valid(songB), 6000)?.track?.title, "Song B");
+  assert.equal(gate.accept(valid(songB), 6000), null);
+  assert.equal(gate.needsRecheck, true);
+  assert.equal(gate.accept(valid(songB), 6800)?.track?.title, "Song B");
   assert.equal(gate.accept(invalid, 7000), null);
   assert.equal(gate.accept(invalid, 15000)?.track, null);
+});
+test("streaming media duration cannot turn one song into repeated track changes", () => {
+  const clock = { textContent: "1:07 / 3:07" };
+  const bar = {
+    querySelector(selector: string) {
+      if (selector === ".time-info") return clock;
+      if (selector === ".title")
+        return { textContent: "Back to the Old House" };
+      if (selector === ".byline")
+        return { textContent: "The Smiths", querySelectorAll: () => [] };
+      return null;
+    },
+  } as unknown as Element;
+  const durations = new PlayerDurationTracker();
+  const store = new StateStore();
+  store.connect();
+  assert.equal(readPlayerDuration(bar), 187);
+  for (let i = 0; i < 30; i++) {
+    const now = i * 250;
+    const mediaDuration = 187 + now / 1000; // the reported production drift
+    const stable = durations.resolve("smiths-song", bar, mediaDuration, now);
+    const read = readTrack(bar, stable);
+    assert.ok(read);
+    store.update({
+      type: "SOURCE_STATE",
+      track: read,
+      positionMs: now,
+      playing: true,
+      ended: false,
+      rate: 1,
+      volume: 0.31,
+      muted: false,
+    });
+  }
+  assert.equal(store.snapshot.track?.durationMs, 187000);
+  assert.equal(store.snapshot.version, 2); // initial metadata, then confirmed duration
+  clock.textContent = "1:08 / 3:07";
+  assert.equal(durations.resolve("smiths-song", bar, 300.8, 8000), 187);
+  assert.equal(durations.resolve("smiths-song", null, 301.5, 8800), 187);
+});
+test("a wrong transitional duration is held until the final candidate settles", () => {
+  const gate = new ReportGate(8000, 700);
+  const read = (title: string, durationMs: number) => ({
+    track: { title, artist: "The Smiths", durationMs },
+    positionMs: 0,
+    playing: true,
+    rate: 1,
+    volume: 0.31,
+    muted: false,
+    clearEvidence: false,
+    seek: false,
+  });
+  gate.accept(read("Song A", 187000), 0);
+  assert.equal(gate.accept(read("Song B", 187000), 100), null);
+  assert.equal(gate.accept(read("Song B", 205000), 400), null);
+  assert.equal(
+    gate.accept(read("Song B", 205000), 1150)?.track?.durationMs,
+    205000,
+  );
+});
+test("repeated duration drift never clears lyrics for the same recording", () => {
+  const gate = new ReportGate(8000, 700);
+  const store = new StateStore();
+  store.connect();
+  for (const [index, durationMs] of [
+    187000, 191000, 195100, 260800, 300800,
+  ].entries()) {
+    const reported = gate.accept(
+      {
+        track: {
+          title: "Back to the Old House",
+          artist: "The Smiths",
+          videoId: "song-video",
+          durationMs,
+        },
+        positionMs: index * 4000,
+        playing: true,
+        rate: 1,
+        volume: 0.31,
+        muted: false,
+        clearEvidence: false,
+        seek: false,
+      },
+      index * 4000,
+    );
+    assert.ok(reported);
+    store.update(reported);
+    if (index === 0)
+      store.setLyrics(store.snapshot.version, {
+        provider: "test",
+        lines: [{ startMs: 0, text: "still here" }],
+      });
+  }
+  assert.equal(store.snapshot.version, 1);
+  assert.equal(store.snapshot.lyrics?.lines[0]?.text, "still here");
+  assert.equal(store.snapshot.track?.durationMs, 187000);
+  // Atlas also protects lyrics if an old extension still reports a drifting length.
+  store.update({
+    type: "SOURCE_STATE",
+    track: {
+      title: "Back to the Old House",
+      artist: "The Smiths",
+      videoId: "song-video",
+      durationMs: 305000,
+    },
+    positionMs: 40000,
+    playing: true,
+    ended: false,
+    rate: 1,
+    volume: 0.31,
+    muted: false,
+  });
+  assert.equal(store.snapshot.version, 1);
+  assert.equal(store.snapshot.lyrics?.lines[0]?.text, "still here");
 });
 test("duration loss does not make an otherwise valid player bar a clear signal", () => {
   const gate = new ReportGate(8000);
@@ -246,6 +368,82 @@ test("LRCLIB retries title-only search but still scores candidates locally", asy
   } finally {
     globalThis.fetch = original;
   }
+});
+test("failed LRCLIB searches do not masquerade as a cacheable no-match", async () => {
+  const original = globalThis.fetch;
+  let attempts = 0;
+  globalThis.fetch = async () => {
+    attempts++;
+    if (attempts === 1) throw new Error("temporary network error");
+    return { ok: true, json: async () => [] } as Response;
+  };
+  try {
+    await assert.rejects(
+      new LrclibProvider(false).getSyncedLyrics(track),
+      /temporary network error/,
+    );
+    assert.ok(attempts >= 2); // another query is tried before scheduling a retry
+  } finally {
+    globalThis.fetch = original;
+  }
+});
+test("Atlas retries transient lyric errors and never applies an obsolete response", async () => {
+  const store = new StateStore();
+  store.connect();
+  store.update({
+    type: "SOURCE_STATE",
+    track,
+    positionMs: 0,
+    playing: true,
+    ended: false,
+    rate: 1,
+    volume: 0.31,
+    muted: false,
+  });
+  let attempts = 0;
+  let warnings = 0;
+  let published = 0;
+  let done!: () => void;
+  const finished = new Promise<void>((resolve) => {
+    done = resolve;
+  });
+  const lookup = new TrackLyricsLookup(
+    store,
+    async () => {
+      if (++attempts === 1) throw new Error("timeout");
+      return { provider: "test", lines: [{ startMs: 1000, text: "line" }] };
+    },
+    () => {
+      published++;
+      done();
+    },
+    () => {
+      warnings++;
+    },
+    [1],
+  );
+  lookup.start(store.snapshot.version, track);
+  await finished;
+  lookup.stop();
+  assert.equal(attempts, 2);
+  assert.equal(warnings, 1);
+  assert.equal(published, 1);
+  assert.equal(store.snapshot.lyrics?.lines[0]?.text, "line");
+  const noDuration = { ...track, durationMs: 0 };
+  store.update({
+    type: "SOURCE_STATE",
+    track: noDuration,
+    positionMs: 0,
+    playing: true,
+    ended: false,
+    rate: 1,
+    volume: 0.31,
+    muted: false,
+  });
+  lookup.start(store.snapshot.version, noDuration);
+  assert.equal(store.snapshot.track?.title, track.title);
+  assert.equal(attempts, 2);
+  lookup.stop();
 });
 test("message validation rejects malformed and unknown commands", () => {
   assert.equal(parseIncoming("{"), null);
@@ -389,6 +587,26 @@ test("media replacement restores prior volume before adopting a fresh default", 
   const desktopChanged = { volume: 0.28, muted: false } as HTMLMediaElement;
   tracker.replace(desktopChanged);
   assert.deepEqual(tracker.known, { volume: 0.28, muted: false });
+});
+test("song changes on the same media element cannot silently reset to 100%", () => {
+  const tracker = new MediaVolumeTracker();
+  const media = { volume: 0.34, muted: false } as HTMLMediaElement;
+  assert.equal(tracker.observe(media, 1000)?.volume, 0.34);
+  tracker.beginTransition(2000);
+  media.volume = 1;
+  assert.equal(tracker.observe(media, 2100)?.volume, 0.34);
+  assert.equal(media.volume, 0.34);
+  media.volume = 1; // late reset, even after the short transition window
+  assert.equal(tracker.observe(media, 9000)?.volume, 0.34);
+  assert.equal(media.volume, 0.34);
+  tracker.allowUserVolume(10000); // a real desktop or Galaxy gesture
+  media.volume = 1;
+  assert.equal(tracker.observe(media, 10001)?.volume, 1);
+  media.volume = 0.42;
+  assert.equal(tracker.observe(media, 10100)?.volume, 0.42);
+  tracker.beginTransition(11000);
+  media.volume = 1;
+  assert.equal(tracker.observe(media, 11001)?.volume, 0.42);
 });
 test("media selection retains the real player over transient preload media", () => {
   const old = {

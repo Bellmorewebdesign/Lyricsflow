@@ -1,5 +1,9 @@
 import type { Command } from "../../shared/protocol.js";
-import { readTrack } from "./metadata.js";
+import {
+  PlayerDurationTracker,
+  readPlayerMetadata,
+  readTrack,
+} from "./metadata.js";
 import { ReportGate } from "./report-gate.js";
 import {
   chooseMedia,
@@ -15,16 +19,45 @@ const volumes = new MediaVolumeTracker();
 let lastSignature = "";
 let lastPosition = -1;
 let observerTimer: ReturnType<typeof setTimeout> | null = null;
+let settleTimer: ReturnType<typeof setTimeout> | null = null;
+let lastBarIdentity = "";
+let lastVideoId = "";
+let lastMediaSrc = "";
 const $ = (selector: string): HTMLElement | null =>
   document.querySelector(selector);
 const gate = new ReportGate();
+const durations = new PlayerDurationTracker();
+function noteTransition(bar: Element | null, videoId: string): void {
+  const metadata = readPlayerMetadata(bar);
+  const identity = metadata
+    ? JSON.stringify([metadata.title, metadata.artist])
+    : "";
+  const src = media?.currentSrc || media?.getAttribute("src") || "";
+  if (
+    (identity && lastBarIdentity && identity !== lastBarIdentity) ||
+    (videoId && lastVideoId && videoId !== lastVideoId) ||
+    (src && lastMediaSrc && src !== lastMediaSrc)
+  )
+    volumes.beginTransition();
+  if (identity) lastBarIdentity = identity;
+  if (videoId) lastVideoId = videoId;
+  if (src) lastMediaSrc = src;
+}
 function findMedia(): void {
   const next = chooseMedia(
     Array.from(document.querySelectorAll<HTMLMediaElement>("video, audio")),
     media,
     document.querySelector("ytmusic-player"),
   );
-  if (next === media) return;
+  if (next === media) {
+    noteTransition(
+      $("ytmusic-player-bar"),
+      new URL(location.href).searchParams.get("v") || "",
+    );
+    volumes.observe(media);
+    return;
+  }
+  if (media && next) volumes.beginTransition();
   const before = volumes.known;
   const after = volumes.replace(next);
   if (__DEBUG_VOLUME__)
@@ -41,8 +74,18 @@ function findMedia(): void {
     for (const event of events) media.addEventListener(event, mediaChanged);
   stopVolume = media
     ? observeVolume(media, () => {
+        noteTransition(
+          $("ytmusic-player-bar"),
+          new URL(location.href).searchParams.get("v") || "",
+        );
+        const before = volumes.known;
+        const reported = volumes.observe(media);
         if (__DEBUG_VOLUME__)
-          console.debug("Media volumechange:", volumes.observe(media));
+          console.debug("Media volumechange:", {
+            before,
+            reported,
+            actual: media?.volume,
+          });
         report(false, true);
       })
     : null;
@@ -55,22 +98,31 @@ const events = [
   "seeking",
   "seeked",
   "ended",
+  "loadstart",
   "loadedmetadata",
   "durationchange",
   "ratechange",
   "emptied",
 ];
 function mediaChanged(event: Event): void {
+  if (["ended", "emptied", "loadstart", "loadedmetadata"].includes(event.type))
+    volumes.beginTransition();
+  volumes.observe(media);
   report(event.type === "seeking" || event.type === "seeked", true);
 }
 function report(seek = false, force = false): void {
   const bar = $("ytmusic-player-bar");
   const url = new URL(location.href);
-  const track = readTrack(
+  const videoId = url.searchParams.get("v") || "";
+  noteTransition(bar, videoId);
+  const metadata = readPlayerMetadata(bar);
+  const duration = durations.resolve(
+    JSON.stringify([metadata?.title, metadata?.artist, videoId]),
     bar,
     media?.duration || 0,
-    url.searchParams.get("v") || undefined,
+    Date.now(),
   );
+  const track = readTrack(bar, duration, videoId || undefined);
   const positionMs =
     media && Number.isFinite(media.currentTime)
       ? Math.max(0, Math.round(media.currentTime * 1000))
@@ -89,9 +141,17 @@ function report(seek = false, force = false): void {
     },
     Date.now(),
   );
-  if (!state) return;
+  if (!state) {
+    if (gate.needsRecheck && !settleTimer)
+      settleTimer = setTimeout(() => {
+        settleTimer = null;
+        findMedia();
+        report();
+      }, 800);
+    return;
+  }
   const signature = JSON.stringify([
-    track,
+    state.track,
     state.playing,
     state.ended,
     state.rate,
@@ -119,6 +179,7 @@ function control(command: Command): boolean {
         : ".play-pause-button, #play-pause-button";
   const button = bar?.querySelector(selector) as HTMLElement | null;
   if (!button || (button as HTMLButtonElement).disabled) return false;
+  if (command === "NEXT" || command === "PREVIOUS") volumes.beginTransition();
   button.click();
   setTimeout(() => report(true, true), 250);
   return true;
@@ -137,8 +198,18 @@ chrome.runtime.onMessage.addListener(
       });
     if (message?.type === "SET_VOLUME") {
       findMedia();
+      if (
+        typeof message.volume !== "number" ||
+        !Number.isFinite(message.volume) ||
+        message.volume < 0 ||
+        message.volume > 1
+      ) {
+        respond({ delivered: false });
+        return;
+      }
       if (__DEBUG_VOLUME__)
         console.debug("SET_VOLUME requested (Galaxy):", message.volume);
+      volumes.allowUserVolume();
       const delivered = setMediaVolume(media, message.volume);
       if (delivered) {
         const applied = volumes.observe(media);
@@ -150,6 +221,21 @@ chrome.runtime.onMessage.addListener(
     }
   },
 );
+// A real desktop slider/keyboard gesture may deliberately choose 100% even during a song change.
+function desktopVolumeGesture(event: Event): void {
+  if (!event.isTrusted) return;
+  const target = event.target;
+  if (
+    target instanceof Element &&
+    target.closest(
+      "ytmusic-player-bar #volume-slider, ytmusic-player-bar .volume-slider, ytmusic-player-bar .volume, ytmusic-player-bar [aria-label*='volume' i]",
+    )
+  )
+    volumes.allowUserVolume();
+}
+document.addEventListener("pointerdown", desktopVolumeGesture, true);
+document.addEventListener("mousedown", desktopVolumeGesture, true);
+document.addEventListener("keydown", desktopVolumeGesture, true);
 function observeBar(): void {
   const bar = $("ytmusic-player-bar");
   if (!bar) {

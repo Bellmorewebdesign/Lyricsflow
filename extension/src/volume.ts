@@ -21,20 +21,68 @@ export function readMediaVolume(
 /** The known source volume survives short gaps in the YouTube Music DOM. */
 export class MediaVolumeTracker {
   private last: MediaVolume | null = null;
+  private transitionUntil = 0;
+  private userMaximumUntil = 0;
 
   get known(): MediaVolume | null {
     return this.last;
   }
 
-  observe(media: HTMLMediaElement | null): MediaVolume | null {
+  /** A player may reset even the same media element to its default during a song change. */
+  beginTransition(now = Date.now()): void {
+    if (this.last) {
+      this.transitionUntil = now + 4000;
+      this.userMaximumUntil = 0;
+    }
+  }
+
+  /** A deliberate volume adjustment, including 100%, supersedes transition protection. */
+  allowUserVolume(now = Date.now()): void {
+    this.userMaximumUntil = now + 4000;
+  }
+
+  observe(
+    media: HTMLMediaElement | null,
+    now = Date.now(),
+  ): MediaVolume | null {
     const value = readMediaVolume(media);
-    if (value) this.last = value;
+    if (
+      media &&
+      value &&
+      this.last &&
+      value.volume === 1 &&
+      this.last.volume < 1 &&
+      now >= this.userMaximumUntil
+    ) {
+      // Default 1.0 must never erase a known lower level without a user gesture.
+      media.volume = this.last.volume;
+      media.muted = this.last.muted;
+      return this.last;
+    }
+    if (
+      media &&
+      value &&
+      this.last &&
+      now < this.transitionUntil &&
+      value.volume === this.last.volume &&
+      this.last.muted &&
+      !value.muted &&
+      now >= this.userMaximumUntil
+    ) {
+      media.muted = true;
+      return this.last;
+    }
+    if (value) {
+      if (value.volume < 1) this.userMaximumUntil = 0;
+      this.last = value;
+    }
     return this.last;
   }
 
   replace(next: HTMLMediaElement | null): MediaVolume | null {
     // A detached element can reset to 1. Keep its last observed value.
     if (!next) return this.last;
+    this.beginTransition();
     const incoming = readMediaVolume(next);
     if (this.last && incoming) {
       // New HTMLMediaElements default to 1. Restore the known level before playback.

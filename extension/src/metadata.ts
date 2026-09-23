@@ -64,13 +64,73 @@ export function readPlayerMetadata(bar: Element | null): PlayerMetadata | null {
   );
 }
 
+function parseClock(value: string): number {
+  const parts = value.trim().split(":");
+  if (
+    parts.length < 2 ||
+    parts.length > 3 ||
+    parts.some((part) => !/^\d{1,3}$/.test(part))
+  )
+    return 0;
+  const numbers = parts.map(Number);
+  if (numbers.slice(1).some((part) => part >= 60)) return 0;
+  const seconds = numbers.reduce((total, part) => total * 60 + part, 0);
+  return seconds > 0 && seconds < 12 * 3600 ? seconds : 0;
+}
+
+/** The player's end-time is more reliable than streaming media.duration. */
+export function readPlayerDuration(bar: Element | null): number {
+  const label = bar?.querySelector(".time-info")?.textContent || "";
+  const clock = label.split("/").pop() || "";
+  const labeled = parseClock(clock);
+  if (labeled) return labeled;
+  const slider = bar?.querySelector(
+    "#progress-bar[aria-valuemax], #progress-bar [aria-valuemax]",
+  );
+  const max = Number(slider?.getAttribute("aria-valuemax"));
+  return Number.isFinite(max) && max > 0 && max < 12 * 3600 ? max : 0;
+}
+
+/** Confirm a duration before matching lyrics; changing media durations are ignored. */
+export class PlayerDurationTracker {
+  private identity = "";
+  private candidate = 0;
+  private since = 0;
+  private confirmed = 0;
+  resolve(
+    identity: string,
+    bar: Element | null,
+    mediaDuration: number,
+    now: number,
+  ): number {
+    if (identity !== this.identity) {
+      this.identity = identity;
+      this.candidate = 0;
+      this.confirmed = 0;
+    }
+    const playerDuration = readPlayerDuration(bar);
+    const raw =
+      playerDuration ||
+      (Number.isFinite(mediaDuration) && mediaDuration > 0 ? mediaDuration : 0);
+    if (raw > 0 && Math.abs(raw - this.confirmed) > 1) {
+      if (Math.abs(raw - this.candidate) > 0.5) {
+        this.candidate = raw;
+        this.since = now;
+      } else if (now - this.since >= (playerDuration ? 650 : 2000)) {
+        this.confirmed = raw;
+      }
+    }
+    return this.confirmed;
+  }
+}
+
 export function readTrack(
   bar: Element | null,
   duration: number,
   videoId?: string,
 ): Track | null {
   const metadata = readPlayerMetadata(bar);
-  if (!metadata || !Number.isFinite(duration) || duration <= 0) return null;
+  if (!metadata) return null;
   const image = bar?.querySelector(
     "img.image, .thumbnail img, img",
   ) as HTMLImageElement | null;

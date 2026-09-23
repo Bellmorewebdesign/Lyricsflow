@@ -13,14 +13,54 @@ export interface PlaybackRead {
 export class ReportGate {
   private lastTrack: Track | null = null;
   private emptySince: number | null = null;
-  constructor(private readonly graceMs = 8000) {}
+  private pendingTrack = "";
+  private pendingSince = 0;
+  get needsRecheck(): boolean {
+    return !!this.pendingTrack;
+  }
+  constructor(
+    private readonly graceMs = 8000,
+    private readonly settleMs = 700,
+  ) {}
   accept(read: PlaybackRead, now: number): SourceState | null {
     if (read.track) {
-      this.lastTrack = read.track;
+      let acceptedTrack = read.track;
+      const sameRecording =
+        this.lastTrack?.title === acceptedTrack.title &&
+        this.lastTrack.artist === acceptedTrack.artist &&
+        (this.lastTrack.videoId || "") === (acceptedTrack.videoId || "");
+      // A streaming duration may grow throughout playback. Keep the first
+      // confirmed length until an actual recording change, not every heartbeat.
+      if (sameRecording && this.lastTrack?.durationMs)
+        acceptedTrack = {
+          ...acceptedTrack,
+          durationMs: this.lastTrack.durationMs,
+        };
+      const key = JSON.stringify([
+        acceptedTrack.title,
+        acceptedTrack.artist,
+        acceptedTrack.durationMs,
+      ]);
+      const previous =
+        this.lastTrack &&
+        JSON.stringify([
+          this.lastTrack.title,
+          this.lastTrack.artist,
+          this.lastTrack.durationMs,
+        ]);
+      if (this.lastTrack && key !== previous) {
+        if (key !== this.pendingTrack) {
+          this.pendingTrack = key;
+          this.pendingSince = now;
+        }
+        if (now - this.pendingSince < this.settleMs) return null;
+      }
+      this.pendingTrack = "";
+      this.lastTrack = acceptedTrack;
       this.emptySince = null;
       return {
         type: "SOURCE_STATE",
-        track: read.track,
+        track: acceptedTrack,
         positionMs: read.positionMs,
         playing: read.playing,
         ended: false,
@@ -30,6 +70,7 @@ export class ReportGate {
         seek: read.seek,
       };
     }
+    this.pendingTrack = "";
     if (!this.lastTrack || !read.clearEvidence) {
       this.emptySince = null;
       return null;
