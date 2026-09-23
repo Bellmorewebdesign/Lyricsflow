@@ -209,7 +209,7 @@ chrome.runtime.onMessage.addListener(
       }
       if (__DEBUG_VOLUME__)
         console.debug("SET_VOLUME requested (Galaxy):", message.volume);
-      volumes.allowUserVolume();
+      volumes.authorizeRequestedVolume(message.volume);
       const delivered = setMediaVolume(media, message.volume);
       if (delivered) {
         const applied = volumes.observe(media);
@@ -221,20 +221,38 @@ chrome.runtime.onMessage.addListener(
     }
   },
 );
-// A real desktop slider/keyboard gesture may deliberately choose 100% even during a song change.
+// A gesture at 50% is not permission for the player to reset to 100%.
+// Only a trusted desktop input explicitly at its maximum authorizes it.
 function desktopVolumeGesture(event: Event): void {
   if (!event.isTrusted) return;
   const target = event.target;
-  if (
-    target instanceof Element &&
-    target.closest(
-      "ytmusic-player-bar #volume-slider, ytmusic-player-bar .volume-slider, ytmusic-player-bar .volume, ytmusic-player-bar [aria-label*='volume' i]",
-    )
-  )
-    volumes.allowUserVolume();
+  if (!(target instanceof Element)) return;
+  const slider = target.closest(
+    "ytmusic-player-bar #volume-slider, ytmusic-player-bar .volume-slider, ytmusic-player-bar .volume, ytmusic-player-bar [aria-label*='volume' i]",
+  );
+  if (!slider) return;
+  if (event instanceof KeyboardEvent && event.key === "End") {
+    volumes.authorizeRequestedVolume(1);
+    return;
+  }
+  if (event.type !== "input" && event.type !== "change") return;
+  const control = target.closest("input, [role='slider']");
+  if (!control) return;
+  const current = Number(
+    control instanceof HTMLInputElement
+      ? control.value
+      : control.getAttribute("aria-valuenow"),
+  );
+  const maximum = Number(
+    control instanceof HTMLInputElement
+      ? control.max
+      : control.getAttribute("aria-valuemax"),
+  );
+  if (maximum > 0 && Number.isFinite(current))
+    volumes.authorizeRequestedVolume(current >= maximum ? 1 : 0);
 }
-document.addEventListener("pointerdown", desktopVolumeGesture, true);
-document.addEventListener("mousedown", desktopVolumeGesture, true);
+document.addEventListener("input", desktopVolumeGesture, true);
+document.addEventListener("change", desktopVolumeGesture, true);
 document.addEventListener("keydown", desktopVolumeGesture, true);
 function observeBar(): void {
   const bar = $("ytmusic-player-bar");
@@ -261,18 +279,25 @@ function observeBar(): void {
 }
 observeBar();
 // Media can be created outside the player bar. Adopt it as soon as it becomes usable.
-const mediaNode = (node: Node): boolean =>
-  node instanceof HTMLMediaElement ||
-  (node instanceof Element && !!node.querySelector("video, audio"));
+const mediaNodes = (node: Node): HTMLMediaElement[] => [
+  ...(node instanceof HTMLMediaElement ? [node] : []),
+  ...(node instanceof Element
+    ? Array.from(node.querySelectorAll<HTMLMediaElement>("video, audio"))
+    : []),
+];
 new MutationObserver((changes) => {
+  for (const change of changes)
+    for (const node of Array.from(change.addedNodes))
+      for (const candidate of mediaNodes(node))
+        if (candidate !== media) volumes.prepare(candidate);
   if (
     changes.some(
       (change) =>
         (change.type === "attributes" &&
           (change.target instanceof HTMLMediaElement ||
             change.target.parentElement instanceof HTMLMediaElement)) ||
-        Array.from(change.addedNodes).some(mediaNode) ||
-        Array.from(change.removedNodes).some(mediaNode),
+        Array.from(change.addedNodes).some((node) => mediaNodes(node).length) ||
+        Array.from(change.removedNodes).some((node) => mediaNodes(node).length),
     )
   )
     findMedia();
@@ -284,6 +309,14 @@ new MutationObserver((changes) => {
 });
 document.addEventListener("loadedmetadata", findMedia, true);
 document.addEventListener("play", findMedia, true);
+document.addEventListener(
+  "volumechange",
+  (event) => {
+    if (event.target instanceof HTMLMediaElement && event.target !== media)
+      volumes.prepare(event.target);
+  },
+  true,
+);
 // YT Music is an SPA. This also finds replacement media elements and corrects drift.
 setInterval(() => {
   findMedia();

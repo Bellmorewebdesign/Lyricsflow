@@ -17,7 +17,7 @@ export class TrackLyricsLookup {
   }
   start(version: number, track: Track): void {
     this.stop();
-    if (!track.durationMs) return; // Metadata is visible; lookup waits for a stable length.
+    // An exact title and artist can still identify lyrics when duration is missing.
     void this.attempt(version, track, 0);
   }
   private active(version: number): boolean {

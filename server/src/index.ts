@@ -144,7 +144,7 @@ wss.on("connection", (ws) => {
         state.clear();
         state.connect();
         broadcast();
-        console.info("Extension connected");
+        console.info("Extension connected:", msg.build || "unknown build");
       } else {
         displays.add(ws);
         send(ws, state.snapshot);
@@ -153,12 +153,22 @@ wss.on("connection", (ws) => {
       return;
     }
     if (role === "source" && msg.type === "SOURCE_STATE" && source === ws) {
+      const previousVolume = state.snapshot.volume;
       const changed = state.update(msg);
+      if (process.env.DEBUG_VOLUME === "true" && previousVolume !== msg.volume)
+        console.info(
+          "Source volume:",
+          msg.volume === null ? "unknown" : `${Math.round(msg.volume * 100)}%`,
+        );
       broadcast();
       if (changed) {
         lookups.stop();
         const snap = state.snapshot;
-        console.info("Track changed:", describeTrack(snap.track));
+        console.info(
+          "Track changed:",
+          describeTrack(snap.track),
+          `volume=${snap.volume === null ? "unknown" : `${Math.round(snap.volume * 100)}%`}`,
+        );
         if (simulator && snap.track?.videoId?.startsWith("lyricsflow-demo-")) {
           const lyrics =
             snap.track.videoId === "lyricsflow-demo-no-lyrics"

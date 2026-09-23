@@ -1,10 +1,10 @@
 {
   "manifest_version": 3,
   "name": "Lyricsflow",
-  "version": "1.0.0",
+  "version": "1.0.5",
   "description": "Send YouTube Music playback to your Lyricsflow display.",
   "minimum_chrome_version": "116",
-  "permissions": ["storage", "tabs"],
+  "permissions": ["storage", "tabs", "scripting"],
   "host_permissions": [
     "https://music.youtube.com/*",
     "http://192.168.1.14/*",

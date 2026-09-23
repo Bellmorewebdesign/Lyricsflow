@@ -36,9 +36,24 @@ export class MediaVolumeTracker {
     }
   }
 
-  /** A deliberate volume adjustment, including 100%, supersedes transition protection. */
-  allowUserVolume(now = Date.now()): void {
-    this.userMaximumUntil = now + 4000;
+  /** Only an explicit request for maximum may authorize a 100% reading. */
+  authorizeRequestedVolume(value: number, now = Date.now()): void {
+    this.userMaximumUntil = value === 1 ? now + 4000 : 0;
+  }
+
+  /** Prepare an inserted playback element before it becomes audible. */
+  prepare(media: HTMLMediaElement): boolean {
+    const incoming = readMediaVolume(media);
+    if (
+      !this.last ||
+      !incoming ||
+      incoming.volume !== 1 ||
+      this.last.volume >= 1
+    )
+      return false;
+    media.volume = this.last.volume;
+    media.muted = this.last.muted;
+    return true;
   }
 
   observe(
@@ -86,10 +101,8 @@ export class MediaVolumeTracker {
     const incoming = readMediaVolume(next);
     if (this.last && incoming) {
       // New HTMLMediaElements default to 1. Restore the known level before playback.
-      if (incoming.volume === 1 && this.last.volume < 1) {
-        next.volume = this.last.volume;
-        next.muted = this.last.muted;
-      } else if (
+      if (
+        !this.prepare(next) &&
         incoming.volume === this.last.volume &&
         this.last.muted &&
         !incoming.muted

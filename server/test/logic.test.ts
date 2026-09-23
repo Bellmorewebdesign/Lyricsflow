@@ -16,6 +16,8 @@ import {
   readTrack,
 } from "../../extension/src/metadata.js";
 import { ReportGate } from "../../extension/src/report-gate.js";
+import { setYouTubePlayerVolume } from "../../extension/src/player-volume.js";
+import { CommandQueue } from "../../extension/src/command-queue.js";
 import {
   chooseMedia,
   MediaVolumeTracker,
@@ -134,6 +136,8 @@ test("streaming media duration cannot turn one song into repeated track changes"
   const store = new StateStore();
   store.connect();
   assert.equal(readPlayerDuration(bar), 187);
+  clock.textContent = "1:07 / 3:07  • time remaining";
+  assert.equal(readPlayerDuration(bar), 187);
   for (let i = 0; i < 30; i++) {
     const now = i * 250;
     const mediaDuration = 187 + now / 1000; // the reported production drift
@@ -157,6 +161,134 @@ test("streaming media duration cannot turn one song into repeated track changes"
   assert.equal(durations.resolve("smiths-song", bar, 300.8, 8000), 187);
   assert.equal(durations.resolve("smiths-song", null, 301.5, 8800), 187);
 });
+test("percentage progress bars cannot invent a 100 second song", () => {
+  const bar = {
+    querySelector(selector: string) {
+      if (selector === ".time-info") return { textContent: "loading" };
+      if (selector === "#progress-bar[aria-valuemax]")
+        return { getAttribute: () => "100" };
+      return null;
+    },
+  } as unknown as Element;
+  assert.equal(readPlayerDuration(bar), 0);
+  const withRealSlider = {
+    querySelector(selector: string) {
+      if (selector === ".time-info") return { textContent: "loading" };
+      if (selector === "#progress-bar #sliderBar[aria-valuemax]")
+        return { getAttribute: () => "187" };
+      if (selector === "#progress-bar[aria-valuemax]")
+        return { getAttribute: () => "100" };
+      return null;
+    },
+  } as unknown as Element;
+  assert.equal(readPlayerDuration(withRealSlider), 187);
+});
+test("LRCLIB exact album and duration lookup finds a song beyond search limits", async () => {
+  const original = globalThis.fetch;
+  const urls: URL[] = [];
+  globalThis.fetch = async (input) => {
+    const url = new URL(String(input));
+    urls.push(url);
+    return {
+      ok: true,
+      json: async () => ({
+        trackName: "Back to the Old House",
+        artistName: "The Smiths",
+        albumName: "Hatful of Hollow",
+        duration: 187,
+        syncedLyrics: "[00:01.00]found",
+      }),
+    } as Response;
+  };
+  try {
+    const lyrics = await new LrclibProvider(false).getSyncedLyrics({
+      title: "Back to the Old House",
+      artist: "The Smiths",
+      album: "Hatful of Hollow",
+      durationMs: 187000,
+    });
+    assert.equal(lyrics?.lines[0]?.text, "found");
+    assert.equal(urls.length, 1);
+    assert.equal(urls[0]?.pathname, "/api/get");
+    assert.equal(urls[0]?.searchParams.get("album_name"), "Hatful of Hollow");
+    assert.equal(urls[0]?.searchParams.get("duration"), "187");
+  } finally {
+    globalThis.fetch = original;
+  }
+});
+test("LRCLIB retries exact duration without album when YouTube album differs", async () => {
+  const original = globalThis.fetch;
+  const urls: URL[] = [];
+  globalThis.fetch = async (input) => {
+    const url = new URL(String(input));
+    urls.push(url);
+    if (url.searchParams.has("album_name"))
+      return { ok: false, status: 404 } as Response;
+    return {
+      ok: true,
+      json: async () => ({
+        trackName: "Back to the Old House",
+        artistName: "The Smiths",
+        albumName: "Another Album",
+        duration: 187,
+        syncedLyrics: "[00:01.00]found",
+      }),
+    } as Response;
+  };
+  try {
+    const lyrics = await new LrclibProvider(false).getSyncedLyrics({
+      title: "Back to the Old House",
+      artist: "The Smiths",
+      album: "YouTube Compilation",
+      durationMs: 187000,
+    });
+    assert.equal(lyrics?.lines[0]?.text, "found");
+    assert.equal(urls.length, 2);
+    assert.equal(urls[1]?.searchParams.has("album_name"), false);
+  } finally {
+    globalThis.fetch = original;
+  }
+});
+test("unknown duration uses exact artist and rejects conflicting recordings", async () => {
+  const original = globalThis.fetch;
+  const records = [
+    {
+      trackName: "Popular Song",
+      artistName: "The Band",
+      albumName: "Album",
+      duration: 180,
+      syncedLyrics: "[00:01.00]correct",
+    },
+    {
+      trackName: "Popular Song",
+      artistName: "The Band",
+      albumName: "Live",
+      duration: 230,
+      syncedLyrics: "[00:01.00]other version",
+    },
+    {
+      trackName: "Popular Song",
+      artistName: "Other Band",
+      albumName: "Album",
+      duration: 180,
+      syncedLyrics: "[00:01.00]wrong artist",
+    },
+  ];
+  globalThis.fetch = async () =>
+    ({ ok: true, json: async () => records }) as Response;
+  try {
+    const provider = new LrclibProvider(false);
+    const input = { title: "Popular Song", artist: "The Band", durationMs: 0 };
+    assert.equal(await provider.getSyncedLyrics(input), null);
+    const matched = await provider.getSyncedLyrics({
+      ...input,
+      album: "Album",
+    });
+    assert.equal(matched?.lines[0]?.text, "correct");
+  } finally {
+    globalThis.fetch = original;
+  }
+});
 test("a wrong transitional duration is held until the final candidate settles", () => {
   const gate = new ReportGate(8000, 700);
   const read = (title: string, durationMs: number) => ({
@@ -175,6 +307,63 @@ test("a wrong transitional duration is held until the final candidate settles", 
   assert.equal(
     gate.accept(read("Song B", 205000), 1150)?.track?.durationMs,
     205000,
+  );
+});
+test("autoplay waits for the new media clock and does not attach a new URL to old lyrics", () => {
+  const gate = new ReportGate(8000, 700);
+  const store = new StateStore();
+  store.connect();
+  const read = (title: string, videoId: string, positionMs: number) => ({
+    track: { title, artist: "The Smiths", videoId, durationMs: 187000 },
+    positionMs,
+    playing: true,
+    rate: 1,
+    volume: 0.5,
+    muted: false,
+    clearEvidence: false,
+    seek: false,
+  });
+  store.update(gate.accept(read("Song A", "a", 180000), 0)!);
+  store.setLyrics(store.snapshot.version, {
+    provider: "test",
+    lines: [{ startMs: 180000, text: "end of A" }],
+  });
+  // YouTube changes the URL first, then title, then the media clock.
+  assert.equal(gate.accept(read("Song A", "b", 181000), 200), null);
+  assert.equal(gate.accept(read("Song B", "b", 182000), 500), null);
+  assert.equal(gate.accept(read("Song B", "b", 184000), 1400), null);
+  assert.equal(store.snapshot.lyrics?.lines[0]?.text, "end of A");
+  const switched = gate.accept(read("Song B", "b", 1200), 1650)!;
+  assert.equal(switched.track?.title, "Song B");
+  assert.equal(switched.positionMs, 1200);
+  assert.equal(switched.seek, true);
+  assert.equal(store.update(switched), true);
+  assert.equal(store.snapshot.lyrics, null);
+  assert.equal(store.snapshot.version, 2);
+});
+test("a URL-only change waits for metadata but a settled repeat can still start", () => {
+  const gate = new ReportGate(8000, 700);
+  const read = (videoId: string, positionMs: number) => ({
+    track: {
+      title: "Song A",
+      artist: "The Smiths",
+      videoId,
+      durationMs: 187000,
+    },
+    positionMs,
+    playing: true,
+    rate: 1,
+    volume: 0.5,
+    muted: false,
+    clearEvidence: false,
+    seek: false,
+  });
+  gate.accept(read("first", 180000), 0);
+  assert.equal(gate.accept(read("second", 1000), 100), null);
+  assert.equal(gate.accept(read("second", 2000), 900), null);
+  assert.equal(
+    gate.accept(read("second", 3500), 2700)?.track?.videoId,
+    "second",
   );
 });
 test("repeated duration drift never clears lyrics for the same recording", () => {
@@ -276,6 +465,14 @@ test("LRC multiple timestamps, fractions, duplicates and malformed lines", () =>
     ],
   );
 });
+test("LRC global offsets align lyrics without modifying the playback clock", () => {
+  assert.deepEqual(parseLrc("[offset:+5000]\n[00:12.00] On time"), [
+    { startMs: 7000, text: "On time" },
+  ]);
+  assert.deepEqual(parseLrc("[offset:-5000]\n[00:12.00] Later"), [
+    { startMs: 17000, text: "Later" },
+  ]);
+});
 test("matches cleaned title, primary artist and close duration only", () => {
   const candidate = {
     trackName: "Song",
@@ -313,6 +510,10 @@ test("LRCLIB scoring accepts safe metadata variants and rejects false versions",
     "duration mismatch",
   );
   assert.equal(
+    assessMatch(input, { ...record, duration: 155 }).reason,
+    "duration mismatch",
+  );
+  assert.equal(
     assessMatch(input, { ...record, trackName: "Money so big live" }).reason,
     "title mismatch",
   );
@@ -336,9 +537,12 @@ test("LRCLIB retries title-only search but still scores candidates locally", asy
   const original = globalThis.fetch;
   const urls: URL[] = [];
   globalThis.fetch = async (input) => {
-    urls.push(new URL(String(input)));
+    const url = new URL(String(input));
+    urls.push(url);
+    if (url.pathname.endsWith("/get"))
+      return { ok: false, status: 404 } as Response;
     const records =
-      urls.length === 1
+      url.searchParams.has("artist_name") || url.searchParams.has("q")
         ? []
         : [
             {
@@ -363,8 +567,11 @@ test("LRCLIB retries title-only search but still scores candidates locally", asy
       durationMs: 150000,
     });
     assert.equal(lyrics?.lines[0]?.text, "right");
+    assert.equal(urls[0]?.pathname, "/api/get");
     assert.equal(urls[0]?.searchParams.get("artist_name"), "Yeat");
-    assert.equal(urls[1]?.searchParams.get("artist_name"), null);
+    assert.equal(urls[1]?.searchParams.get("artist_name"), "Yeat");
+    assert.equal(urls[2]?.searchParams.get("q"), "Monëy so big Yeat");
+    assert.equal(urls[3]?.searchParams.get("artist_name"), null);
   } finally {
     globalThis.fetch = original;
   }
@@ -441,9 +648,63 @@ test("Atlas retries transient lyric errors and never applies an obsolete respons
     muted: false,
   });
   lookup.start(store.snapshot.version, noDuration);
+  await new Promise<void>((resolve) => setImmediate(resolve));
   assert.equal(store.snapshot.track?.title, track.title);
-  assert.equal(attempts, 2);
+  assert.equal(attempts, 3);
+  assert.equal(store.snapshot.lyrics?.lines[0]?.text, "line");
   lookup.stop();
+});
+test("explicit Galaxy volume also updates YouTube Music's player setting", () => {
+  const previous = Object.getOwnPropertyDescriptor(globalThis, "document");
+  const saved: number[] = [];
+  Object.defineProperty(globalThis, "document", {
+    configurable: true,
+    value: {
+      querySelector: () => ({
+        setVolume: (value: number) => saved.push(value),
+      }),
+    },
+  });
+  try {
+    assert.equal(setYouTubePlayerVolume(0.5), true);
+    assert.equal(setYouTubePlayerVolume(1), true); // deliberate maximum is permitted
+    assert.equal(setYouTubePlayerVolume(-1), false);
+    assert.equal(setYouTubePlayerVolume(NaN), false);
+    assert.deepEqual(saved, [50, 100]);
+  } finally {
+    if (previous) Object.defineProperty(globalThis, "document", previous);
+    else Reflect.deleteProperty(globalThis, "document");
+  }
+});
+test("slow player injection cannot overwrite a later final slider value", async () => {
+  const queue = new CommandQueue();
+  const applied: number[] = [];
+  let release!: () => void;
+  const blocked = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const first = queue.run(async () => {
+    await blocked;
+    applied.push(1);
+  });
+  const last = queue.run(async () => {
+    applied.push(0.5);
+  });
+  assert.deepEqual(applied, []);
+  release();
+  await Promise.all([first, last]);
+  assert.deepEqual(applied, [1, 0.5]);
+});
+test("new preload element inherits known lower volume before playback", () => {
+  const tracker = new MediaVolumeTracker();
+  tracker.observe({ volume: 0.5, muted: false } as HTMLMediaElement);
+  const next = { volume: 1, muted: false } as HTMLMediaElement;
+  assert.equal(tracker.prepare(next), true);
+  assert.equal(next.volume, 0.5);
+  assert.equal(tracker.known?.volume, 0.5);
+  const desktopUserVolume = { volume: 0.3, muted: false } as HTMLMediaElement;
+  assert.equal(tracker.prepare(desktopUserVolume), false);
+  assert.equal(desktopUserVolume.volume, 0.3);
 });
 test("message validation rejects malformed and unknown commands", () => {
   assert.equal(parseIncoming("{"), null);
@@ -464,6 +725,17 @@ test("message validation rejects malformed and unknown commands", () => {
       JSON.stringify({ type: "HELLO", role: "display", protocol: 2 }),
     ),
     null,
+  );
+  assert.deepEqual(
+    parseIncoming(
+      JSON.stringify({
+        type: "HELLO",
+        role: "source",
+        protocol: 3,
+        build: "1.0.5",
+      }),
+    ),
+    { type: "HELLO", role: "source", protocol: 3, build: "1.0.5" },
   );
 });
 test("volume protocol accepts only finite unit values and short nonempty ids", () => {
@@ -599,9 +871,13 @@ test("song changes on the same media element cannot silently reset to 100%", () 
   media.volume = 1; // late reset, even after the short transition window
   assert.equal(tracker.observe(media, 9000)?.volume, 0.34);
   assert.equal(media.volume, 0.34);
-  tracker.allowUserVolume(10000); // a real desktop or Galaxy gesture
+  tracker.authorizeRequestedVolume(0.5, 10000); // a 50% drag cannot permit 100%
   media.volume = 1;
-  assert.equal(tracker.observe(media, 10001)?.volume, 1);
+  assert.equal(tracker.observe(media, 10001)?.volume, 0.34);
+  assert.equal(media.volume, 0.34);
+  tracker.authorizeRequestedVolume(1, 10002); // explicit desktop or Galaxy maximum
+  media.volume = 1;
+  assert.equal(tracker.observe(media, 10003)?.volume, 1);
   media.volume = 0.42;
   assert.equal(tracker.observe(media, 10100)?.volume, 0.42);
   tracker.beginTransition(11000);

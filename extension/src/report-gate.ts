@@ -15,6 +15,7 @@ export class ReportGate {
   private emptySince: number | null = null;
   private pendingTrack = "";
   private pendingSince = 0;
+  private lastPositionMs = 0;
   get needsRecheck(): boolean {
     return !!this.pendingTrack;
   }
@@ -40,6 +41,7 @@ export class ReportGate {
         acceptedTrack.title,
         acceptedTrack.artist,
         acceptedTrack.durationMs,
+        acceptedTrack.videoId || "",
       ]);
       const previous =
         this.lastTrack &&
@@ -47,16 +49,36 @@ export class ReportGate {
           this.lastTrack.title,
           this.lastTrack.artist,
           this.lastTrack.durationMs,
+          this.lastTrack.videoId || "",
         ]);
       if (this.lastTrack && key !== previous) {
         if (key !== this.pendingTrack) {
           this.pendingTrack = key;
           this.pendingSince = now;
         }
-        if (now - this.pendingSince < this.settleMs) return null;
+        const changedRecording = !sameRecording;
+        // The bar and watch URL can update before the actual playback media.
+        // Never pair a new song's lyrics with the outgoing song's currentTime.
+        const playbackRestarted =
+          read.positionMs <= 10000 ||
+          read.positionMs < this.lastPositionMs - 3000;
+        const sameMetadata =
+          this.lastTrack.title === acceptedTrack.title &&
+          this.lastTrack.artist === acceptedTrack.artist;
+        const settle =
+          changedRecording && sameMetadata
+            ? Math.max(2500, this.settleMs)
+            : this.settleMs;
+        if (
+          now - this.pendingSince < settle ||
+          (changedRecording && read.playing && !playbackRestarted)
+        )
+          return null;
       }
+      const changedRecording = !!this.lastTrack && !sameRecording;
       this.pendingTrack = "";
       this.lastTrack = acceptedTrack;
+      this.lastPositionMs = read.positionMs;
       this.emptySince = null;
       return {
         type: "SOURCE_STATE",
@@ -67,7 +89,7 @@ export class ReportGate {
         rate: read.rate,
         volume: read.volume,
         muted: read.muted,
-        seek: read.seek,
+        seek: read.seek || changedRecording,
       };
     }
     this.pendingTrack = "";
@@ -78,6 +100,7 @@ export class ReportGate {
     if (this.emptySince === null) this.emptySince = now;
     if (now - this.emptySince < this.graceMs) return null;
     this.lastTrack = null;
+    this.lastPositionMs = 0;
     this.emptySince = null;
     return {
       type: "SOURCE_STATE",

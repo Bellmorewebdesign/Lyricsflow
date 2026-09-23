@@ -81,14 +81,18 @@ function parseClock(value: string): number {
 /** The player's end-time is more reliable than streaming media.duration. */
 export function readPlayerDuration(bar: Element | null): number {
   const label = bar?.querySelector(".time-info")?.textContent || "";
-  const clock = label.split("/").pop() || "";
+  const clock =
+    (label.split("/").pop() || "").match(/\d{1,3}:\d{2}(?::\d{2})?/g)?.pop() ||
+    "";
   const labeled = parseClock(clock);
   if (labeled) return labeled;
-  const slider = bar?.querySelector(
-    "#progress-bar[aria-valuemax], #progress-bar [aria-valuemax]",
-  );
+  const slider =
+    bar?.querySelector("#progress-bar #sliderBar[aria-valuemax]") ||
+    bar?.querySelector("#progress-bar [role='slider'][aria-valuemax]") ||
+    bar?.querySelector("#progress-bar[aria-valuemax]");
   const max = Number(slider?.getAttribute("aria-valuemax"));
-  return Number.isFinite(max) && max > 0 && max < 12 * 3600 ? max : 0;
+  // 100 is also the default percentage range on some progress controls.
+  return Number.isFinite(max) && max > 100 && max < 12 * 3600 ? max : 0;
 }
 
 /** Confirm a duration before matching lyrics; changing media durations are ignored. */

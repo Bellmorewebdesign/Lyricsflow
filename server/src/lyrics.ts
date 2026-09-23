@@ -53,6 +53,8 @@ function primaryArtist(value: string): string {
 }
 export function parseLrc(raw: string): Line[] {
   const lines: Line[] = [];
+  const offsetTag = raw.match(/^\s*\[offset:\s*([+-]?\d{1,5})\s*\]/im);
+  const offsetMs = offsetTag ? Number(offsetTag[1]) : 0;
   for (const row of raw.split(/\r?\n/)) {
     const re = /\[(\d{1,3}):(\d{2})(?:[.:](\d{1,3}))?\]/g;
     const matches = [...row.matchAll(re)];
@@ -66,7 +68,9 @@ export function parseLrc(raw: string): Line[] {
       const startMs =
         (minutes * 60 + seconds) * 1000 +
         Number(fraction.padEnd(3, "0").slice(0, 3));
-      lines.push({ startMs, text });
+      // LRC's positive offset advances the lyrics. Ignoring this tag can
+      // shift every line of an otherwise correct match by several seconds.
+      lines.push({ startMs: Math.max(0, startMs - offsetMs), text });
     }
   }
   return lines
@@ -76,6 +80,7 @@ export function parseLrc(raw: string): Line[] {
 export interface Result {
   trackName: string;
   artistName: string;
+  albumName?: string;
   duration: number;
   syncedLyrics: string | null;
   instrumental?: boolean;
@@ -102,15 +107,15 @@ export function assessMatch(
     (artist === primary || candidateArtist === candidatePrimary);
   if (!fullArtistMatch && !safePrimaryMatch)
     return { score: -1, reason: "artist mismatch" };
-  // Allow modest encoding/player rounding errors, but reject alternate cuts and live versions.
+  if (!track.durationMs && !fullArtistMatch)
+    return { score: -1, reason: "unknown duration requires full artist" };
+  // The correct recording should agree within a few seconds. A 5-second
+  // alternate edit can have otherwise identical title and artist metadata.
   const difference =
     track.durationMs > 0
       ? Math.abs(track.durationMs / 1000 - item.duration)
       : 0;
-  if (
-    track.durationMs > 0 &&
-    difference > Math.max(4, Math.min(8, item.duration * 0.025))
-  )
+  if (track.durationMs > 0 && difference > 3)
     return { score: -1, reason: "duration mismatch" };
   return {
     score: (fullArtistMatch ? 110 : 100) - difference,
@@ -138,18 +143,47 @@ export class LrclibProvider implements LyricsProvider {
       console.info(
         `LRCLIB query: ${JSON.stringify(queryTitle)} — ${JSON.stringify(queryArtist)} [${(track.durationMs / 1000).toFixed(1)}s]`,
       );
-    let matched: Lyrics | null = null;
+    const candidates: Result[] = [];
     let searchError: unknown = null;
+    // LRCLIB search is capped at 20 records. Try the specific get endpoint
+    // with album and duration first, then a focused keyword search.
+    if (track.durationMs > 0) {
+      const exactQuery = {
+        track_name: queryTitle,
+        artist_name: queryArtist,
+        duration: String(Math.round(track.durationMs / 1000)),
+      };
+      for (const params of track.album
+        ? [{ ...exactQuery, album_name: track.album }, exactQuery]
+        : [exactQuery]) {
+        try {
+          const exact = await this.getExact(params);
+          if (exact) {
+            const result = this.select(track, [exact]);
+            if (result) return result;
+          }
+        } catch (error) {
+          searchError = error;
+          if (this.debug)
+            console.info(
+              "LRCLIB exact lookup failed:",
+              error instanceof Error ? error.message : error,
+            );
+        }
+      }
+    }
     const searches: {
       track_name?: string;
       artist_name?: string;
       q?: string;
     }[] = [
       { track_name: queryTitle, artist_name: queryArtist },
+      { q: `${queryTitle} ${queryArtist}` },
       { track_name: queryTitle },
     ];
+    const normalizedQuery = `${normalize(queryTitle)} ${normalizeArtist(track.artist)}`;
     if (normalize(queryTitle) !== queryTitle.toLowerCase())
-      searches.push({ q: normalize(queryTitle) });
+      searches.push({ q: normalizedQuery });
     for (const params of searches) {
       let results: Result[];
       try {
@@ -176,19 +210,72 @@ export class LrclibProvider implements LyricsProvider {
             `LRCLIB candidate: ${JSON.stringify(candidate.item.trackName)} — ${JSON.stringify(candidate.item.artistName)} [${candidate.item.duration.toFixed(1)}s]: ${candidate.reason}`,
           );
       }
-      for (const candidate of ranked) {
-        if (candidate.score < 0) break;
-        const lines = parseLrc(candidate.item.syncedLyrics || "");
-        if (lines.length) {
-          matched = { provider: this.name, lines };
-          break;
-        }
+      candidates.push(...results);
+      // With a confirmed length, local title/artist/duration scoring is safe.
+      if (track.durationMs > 0) {
+        const matched = this.select(track, results);
+        if (matched) return matched;
       }
-      if (matched) break;
     }
     // An incomplete set of searches must not be cached as a definitive miss.
+    if (!track.durationMs && searchError) throw searchError;
+    const matched = this.select(track, candidates);
     if (!matched && searchError) throw searchError;
     return matched;
+  }
+  private select(track: Track, items: Result[]): Lyrics | null {
+    let ranked = items
+      .map((item) => ({ item, ...assessMatch(track, item) }))
+      .filter(
+        (candidate) =>
+          candidate.score >= 0 &&
+          parseLrc(candidate.item.syncedLyrics || "").length,
+      )
+      .sort((a, b) => b.score - a.score);
+    if (!ranked.length) return null;
+    if (!track.durationMs) {
+      const album = normalize(track.album || "");
+      const sameAlbum = album
+        ? ranked.filter(
+            (candidate) => normalize(candidate.item.albumName || "") === album,
+          )
+        : [];
+      if (sameAlbum.length) ranked = sameAlbum;
+      // Without a trusted duration, distinct recordings are ambiguous.
+      if (
+        ranked.some(
+          (candidate) =>
+            Math.abs(candidate.item.duration - ranked[0]!.item.duration) > 4,
+        )
+      ) {
+        if (this.debug)
+          console.info("LRCLIB candidates rejected: ambiguous durations");
+        return null;
+      }
+    }
+    if (this.debug)
+      console.info(
+        `LRCLIB selected: ${JSON.stringify(ranked[0]!.item.trackName)} — ${JSON.stringify(ranked[0]!.item.artistName)} [${ranked[0]!.item.duration.toFixed(1)}s], offset=${ranked[0]!.item.syncedLyrics?.match(/^\s*\[offset:\s*([+-]?\d+)\s*\]/im)?.[1] || 0}ms`,
+      );
+    return {
+      provider: this.name,
+      lines: parseLrc(ranked[0]!.item.syncedLyrics!),
+    };
+  }
+  private async getExact(params: {
+    track_name: string;
+    artist_name: string;
+    album_name?: string;
+    duration: string;
+  }): Promise<Result | null> {
+    const url = new URL("https://lrclib.net/api/get");
+    for (const [key, value] of Object.entries(params))
+      url.searchParams.set(key, value);
+    const response = await this.request(url);
+    if (response.status === 404) return null;
+    if (!response.ok) throw new Error(`LRCLIB HTTP ${response.status}`);
+    const item: unknown = await response.json();
+    return isResult(item) ? item : null;
   }
   private async search(params: {
     track_name?: string;
@@ -198,7 +285,14 @@ export class LrclibProvider implements LyricsProvider {
     const url = new URL("https://lrclib.net/api/search");
     for (const [key, value] of Object.entries(params))
       if (value) url.searchParams.set(key, value);
-    const response = await fetch(url, {
+    const response = await this.request(url);
+    if (!response.ok) throw new Error(`LRCLIB HTTP ${response.status}`);
+    const items: unknown = await response.json();
+    if (!Array.isArray(items)) throw new Error("Invalid LRCLIB response");
+    return items.filter(isResult);
+  }
+  private request(url: URL): Promise<Response> {
+    return fetch(url, {
       signal: AbortSignal.timeout(7000),
       headers: {
         "User-Agent":
@@ -206,20 +300,20 @@ export class LrclibProvider implements LyricsProvider {
         Accept: "application/json",
       },
     });
-    if (!response.ok) throw new Error(`LRCLIB HTTP ${response.status}`);
-    const items: unknown = await response.json();
-    if (!Array.isArray(items)) throw new Error("Invalid LRCLIB response");
-    return items.filter(
-      (v): v is Result =>
-        v &&
-        typeof v.trackName === "string" &&
-        typeof v.artistName === "string" &&
-        typeof v.duration === "number" &&
-        Number.isFinite(v.duration) &&
-        v.duration > 0 &&
-        (typeof v.syncedLyrics === "string" || v.syncedLyrics === null),
-    );
   }
+}
+function isResult(v: unknown): v is Result {
+  return (
+    !!v &&
+    typeof v === "object" &&
+    typeof (v as Result).trackName === "string" &&
+    typeof (v as Result).artistName === "string" &&
+    typeof (v as Result).duration === "number" &&
+    Number.isFinite((v as Result).duration) &&
+    (v as Result).duration > 0 &&
+    (typeof (v as Result).syncedLyrics === "string" ||
+      (v as Result).syncedLyrics === null)
+  );
 }
 interface CacheEntry {
   expires: number;
@@ -234,7 +328,7 @@ export class LyricsService {
   ) {}
   async get(track: Track): Promise<Lyrics | null> {
     const key = createHash("sha256")
-      .update("lyrics-match-v3\0")
+      .update("lyrics-match-v5\0")
       .update(
         JSON.stringify([
           normalize(track.title),

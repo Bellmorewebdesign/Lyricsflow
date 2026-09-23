@@ -3,7 +3,10 @@ import {
   PROTOCOL_VERSION,
   type SourceState,
 } from "../../shared/protocol.js";
+import { setYouTubePlayerVolume } from "./player-volume.js";
+import { CommandQueue } from "./command-queue.js";
 declare const chrome: any;
+declare const __DEBUG_VOLUME__: boolean;
 const DEFAULT_URL = "ws://192.168.1.14:8766/ws";
 let socket: WebSocket | null = null;
 let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
@@ -11,6 +14,7 @@ let retry = 1000;
 let selectedTab: number | null = null;
 let lastState: SourceState | null = null;
 let lastReport = 0;
+const commands = new CommandQueue();
 function connect(): void {
   if (
     socket &&
@@ -34,6 +38,7 @@ function connect(): void {
               type: "HELLO",
               role: "source",
               protocol: PROTOCOL_VERSION,
+              build: chrome.runtime.getManifest().version,
             }),
           );
           if (lastState && Date.now() - lastReport < 15000)
@@ -57,13 +62,42 @@ function connect(): void {
             );
             return;
           }
-          chrome.tabs
-            .sendMessage(
-              selectedTab,
+          const tabId = selectedTab;
+          const deliver = async (): Promise<{ delivered?: boolean }> => {
+            if (msg.type === "SET_VOLUME") {
+              // The isolated content script cannot access the site's JS player
+              // instance. Sync its saved volume before setting the real media.
+              try {
+                const results = await chrome.scripting.executeScript({
+                  target: { tabId },
+                  world: "MAIN",
+                  func: setYouTubePlayerVolume,
+                  args: [msg.volume],
+                });
+                if (__DEBUG_VOLUME__)
+                  console.debug(
+                    "Galaxy volume saved in YouTube Music player:",
+                    results?.some(
+                      (result: { result?: boolean }) => result.result,
+                    ),
+                  );
+              } catch (error) {
+                if (__DEBUG_VOLUME__)
+                  console.debug(
+                    "YouTube Music player volume unavailable:",
+                    error,
+                  );
+              }
+            }
+            return chrome.tabs.sendMessage(
+              tabId,
               msg.type === "SET_VOLUME"
                 ? { type: "SET_VOLUME", volume: msg.volume }
                 : { type: "CONTROL", command: msg.command },
-            )
+            );
+          };
+          commands
+            .run(deliver)
             .then((answer: { delivered?: boolean }) => {
               if (ws.readyState === WebSocket.OPEN)
                 ws.send(

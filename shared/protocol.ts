@@ -42,7 +42,7 @@ export interface Snapshot {
   seek?: boolean;
 }
 export type Incoming =
-  | { type: "HELLO"; role: "source" | "display"; protocol: 3 }
+  | { type: "HELLO"; role: "source" | "display"; protocol: 3; build?: string }
   | SourceState
   | { type: "CONTROL_COMMAND"; command: Command; id: string }
   | { type: "SET_VOLUME"; volume: number; id: string }
@@ -74,7 +74,16 @@ export function parseIncoming(raw: string): Incoming | null {
     v.protocol === PROTOCOL_VERSION &&
     (v.role === "source" || v.role === "display")
   )
-    return { type: "HELLO", role: v.role, protocol: PROTOCOL_VERSION };
+    return {
+      type: "HELLO",
+      role: v.role,
+      protocol: PROTOCOL_VERSION,
+      ...(v.role === "source" &&
+      typeof v.build === "string" &&
+      /^\d+\.\d+\.\d+$/.test(v.build)
+        ? { build: v.build }
+        : {}),
+    };
   if (v.type === "PING") return { type: "PING" };
   if (v.type === "CONTROL_ACK" && id(v.id) && typeof v.delivered === "boolean")
     return { type: "CONTROL_ACK", id: v.id, delivered: v.delivered };
