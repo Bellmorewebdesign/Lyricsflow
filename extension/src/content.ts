@@ -1,8 +1,10 @@
 import type { Command } from "../../shared/protocol.js";
 import { readTrack } from "./metadata.js";
 import { ReportGate } from "./report-gate.js";
+import { observeVolume, readMediaVolume, setMediaVolume } from "./volume.js";
 declare const chrome: any;
 let media: HTMLMediaElement | null = null;
+let stopVolume: (() => void) | null = null;
 let lastSignature = "";
 let lastPosition = -1;
 let observerTimer: ReturnType<typeof setTimeout> | null = null;
@@ -14,11 +16,13 @@ function findMedia(): void {
     "video, audio",
   ) as HTMLMediaElement | null;
   if (next === media) return;
+  stopVolume?.();
   if (media)
     for (const event of events) media.removeEventListener(event, mediaChanged);
   media = next;
   if (media)
     for (const event of events) media.addEventListener(event, mediaChanged);
+  stopVolume = media ? observeVolume(media, () => report(false, true)) : null;
   report(true);
 }
 const events = [
@@ -56,6 +60,7 @@ function report(seek = false, force = false): void {
       positionMs,
       playing: !!media && !media.paused && !media.ended,
       rate: media?.playbackRate || 1,
+      ...readMediaVolume(media),
       seek,
       clearEvidence: !titlePresent && !bylinePresent && (!media || media.ended),
     },
@@ -67,6 +72,8 @@ function report(seek = false, force = false): void {
     state.playing,
     state.ended,
     state.rate,
+    state.volume,
+    state.muted,
   ]);
   if (
     !force &&
@@ -105,6 +112,12 @@ chrome.runtime.onMessage.addListener(
           ["NEXT", "PREVIOUS", "PLAY_PAUSE"].includes(message.command) &&
           control(message.command),
       });
+    if (message?.type === "SET_VOLUME") {
+      findMedia();
+      const delivered = setMediaVolume(media, message.volume);
+      if (delivered) report(false, true);
+      respond({ delivered });
+    }
   },
 );
 function observeBar(): void {

@@ -1,4 +1,4 @@
-import type { SourceState } from "../../shared/protocol.js";
+import { PROTOCOL_VERSION, type SourceState } from "../../shared/protocol.js";
 const log = document.querySelector<HTMLElement>("#status")!;
 let ws: WebSocket | null = null;
 let timer: ReturnType<typeof setInterval> | null = null;
@@ -6,6 +6,8 @@ let index = 0,
   position = 0,
   playing = false,
   noLyrics = false;
+let volume = 1;
+let muted = false;
 const tracks = [
   {
     title: "Afterglow",
@@ -36,6 +38,8 @@ function state(seek = false): SourceState {
     playing,
     ended: false,
     rate: 1,
+    volume,
+    muted,
     seek,
   };
 }
@@ -50,7 +54,13 @@ function connect(): void {
   );
   ws.onopen = () => {
     log.textContent = "Connected to Atlas";
-    ws!.send(JSON.stringify({ type: "HELLO", role: "source", protocol: 1 }));
+    ws!.send(
+      JSON.stringify({
+        type: "HELLO",
+        role: "source",
+        protocol: PROTOCOL_VERSION,
+      }),
+    );
     send(true);
   };
   ws.onclose = () => {
@@ -62,6 +72,15 @@ function connect(): void {
     try {
       msg = JSON.parse(event.data);
     } catch {
+      return;
+    }
+    if (msg.type === "SET_VOLUME") {
+      volume = Math.max(0, Math.min(1, msg.volume));
+      if (volume > 0) muted = false;
+      send();
+      ws?.send(
+        JSON.stringify({ type: "CONTROL_ACK", id: msg.id, delivered: true }),
+      );
       return;
     }
     if (msg.type !== "CONTROL_COMMAND") return;
@@ -129,6 +148,8 @@ for (const button of Array.from(
             playing: false,
             ended: true,
             rate: 1,
+            volume,
+            muted,
           }),
         );
         break;

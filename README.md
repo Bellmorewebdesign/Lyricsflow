@@ -1,6 +1,6 @@
 # Lyricsflow
 
-A black until music plays lyric display for a Galaxy Tab A. A Chrome/Edge extension reads YouTube Music on your Windows computer, Atlas fetches synchronized lyrics and relays playback, and the tablet draws the current line and three temporary remote controls. The tablet never plays audio or searches for lyrics.
+A black until music plays lyric display for a Galaxy Tab A. A Chrome/Edge extension reads YouTube Music on your Windows computer, Atlas fetches synchronized lyrics and relays playback, and the tablet draws the current line and temporary playback and volume controls. The tablet never plays audio or searches for lyrics.
 
 ```text
 YouTube Music → MV3 extension ↔ Atlas (Node + WebSocket + LRCLIB cache) ↔ Galaxy display
@@ -18,7 +18,7 @@ YouTube Music → MV3 extension ↔ Atlas (Node + WebSocket + LRCLIB cache) ↔ 
 - `server/src`: HTTP/WebSocket server, state ownership, LRCLIB matching and disk cache.
 - `extension/src`: MV3 service worker, YouTube Music content script, settings.
 - `display/src`: old browser targeted display logic, interpolation, state machine and simulator.
-- `shared`: version 1 message types and input validation.
+- `shared`: version 2 message types and input validation.
 - `display/public`, `extension/public`: browser assets.
 - `docs`: architecture and Ubuntu deployment.
 
@@ -42,11 +42,11 @@ HOST=0.0.0.0 PORT=8766 npm start
 3. Right click the extension icon → **Options**. Set `ws://192.168.1.14:8777/ws` if Atlas is on your current port 8777 (`8766` is the extension default). Reload an already open YouTube Music tab after first installation.
 4. Start playback at `https://music.youtube.com/`. Keep the browser running. The source lives in the Chrome/Edge service worker; there is no desktop program to start.
 
-If the server IP changes, edit the extension host permissions in `extension/public/manifest.json` to include the new `http://IP/*`, rebuild, and reload the unpacked extension. The options page changes the WebSocket URL. Remote controls click YouTube Music's real player buttons; the following player state confirms the result.
+If the server IP changes, edit the extension host permissions in `extension/public/manifest.json` to include the new `http://IP/*`, rebuild, and reload the unpacked extension. The options page changes the WebSocket URL. Remote controls click YouTube Music's real player buttons; volume commands set the actual media element. ACKs confirm delivery and the subsequent source state confirms actual playback and volume.
 
 ## Tablet
 
-Open **http://192.168.1.14:8766/display** (or **http://192.168.1.14:8777/display** when configured for port 8777). Standby is completely black. Tap anywhere to show Previous, Play/Pause, Next for 4.5 seconds. The controls fade out on their own. When timed lyrics are available, the current line and two adjacent lines appear. While lyrics load or if no synchronized match exists, the dark artwork, a clear cover image, song title and artist remain visible without an error message. Pause holds either view for 60 seconds, then fades to black; resume redraws at the actual player position. The optional web app manifest supports adding a home screen shortcut, but install/fullscreen support on an HTTP LAN origin depends on the Android browser. Use browser full screen or kiosk mode if the browser will not install a PWA over HTTP.
+Open **http://192.168.1.14:8766/display** (or **http://192.168.1.14:8777/display** when configured for port 8777). Standby is completely black. Tap anywhere to show Previous, Play/Pause, Next and a volume slider for 4.5 seconds; dragging keeps them visible. The slider follows the actual YouTube Music media volume, including changes on the desktop. Drag updates are limited to about seven per second and the final value is sent on release. When timed lyrics are available, the current line and two adjacent lines appear. For every valid track while lyrics load, are absent, are unsynchronized, time out or error, the song title and artist remain visible with a dark artwork background and cover if available. If artwork is absent or fails, the title and artist remain visible against dark. No loading or error text appears. Pause holds either view for 60 seconds, then fades to black; resume redraws at the actual player position. The optional web app manifest supports adding a home screen shortcut, but install/fullscreen support on an HTTP LAN origin depends on the Android browser. Use browser full screen or kiosk mode if the browser will not install a PWA over HTTP.
 
 ## Simulator
 
@@ -64,7 +64,7 @@ For source edits, `npm run dev` restarts the server; run `npm run build` again a
 
 Atlas queries the public [LRCLIB API](https://lrclib.net/docs) first with cleaned title and artist. If that search returns no acceptable timed match, it searches by title and scores every candidate locally. A transliterated title search may be tried for accented or stylized titles. Acceptance still requires the exact normalized title, matching artist or a clearly matching credited primary artist, and duration within roughly 4–8 seconds. Common official video/audio tags, explicit markers, featuring credits, and remaster tags are stripped for matching. Alternate mixes with a substantially different duration are rejected. Good matches persist for 30 days under `data/`; missing matches for six hours. The matching cache is versioned, so old negative results do not need to be deleted. API errors do not poison the cache. Set `DEBUG_LYRICS=true` in the server environment to see query metadata, result counts and short candidate rejection reasons without logging lyric bodies. `LyricsProvider` can be replaced without changing the display or server protocol. Provider availability and licensing remain subject to LRCLIB; no lyrics are bundled or generated.
 
-The extension reads `HTMLMediaElement.currentTime`, `duration`, `paused`, `ended` and `playbackRate`; player bar metadata supplies title, artist, album and cover. Dedicated artist links take precedence, and bullet-separated bylines are parsed as distinct artist/album/year fields. An incomplete read during a song transition does not immediately erase a valid track. Atlas sends the entire lyric timeline on a track update and sends authoritative playback position. The tablet extrapolates from **local elapsed time since receipt**, schedules the next line boundary, and gently corrects small heartbeat drift. Seek, pause, resume and track changes update immediately. Without synchronized lyrics, it shows the cover and track information instead.
+The extension reads `HTMLMediaElement.currentTime`, `duration`, `paused`, `ended`, `playbackRate`, `volume` and `muted`; it listens for `volumechange` on the current media element and attaches again when the element is replaced. A validated `SET_VOLUME` command travels from Galaxy through Atlas to the extension, which clamps the value to 0–1, sets `media.volume`, unmutes on a positive value, and reports the resulting media state. Tablet state follows this report, including desktop volume changes. Player bar metadata supplies title, artist, album and cover. Dedicated artist links take precedence, and bullet-separated bylines are parsed as distinct artist/album/year fields. An incomplete read during a song transition does not immediately erase a valid track. Atlas sends the entire lyric timeline on a track update and sends authoritative playback position. The tablet extrapolates from **local elapsed time since receipt**, schedules the next line boundary, and gently corrects small heartbeat drift. Seek, pause, resume and track changes update immediately. Without synchronized lyrics, it shows track information even if artwork fails.
 
 ## Troubleshooting
 
@@ -72,7 +72,8 @@ The extension reads `HTMLMediaElement.currentTime`, `duration`, `paused`, `ended
 - **Artwork visible but lyrics missing:** check Atlas logs for quoted title, artist and duration. Temporarily launch Atlas with `DEBUG_LYRICS=true` to inspect result counts and candidate rejection reasons. Older missing-result cache entries are ignored by this version; you do not need to clear `data/`.
 - **Extension connected but no track:** reload the YouTube Music tab after installing the extension; check the tab's console for selector changes. YouTube Music is a third party SPA, and DOM selectors can change.
 - **Tablet does not load:** verify Atlas IP, Wi-Fi, port 8766, and Ubuntu firewall (`sudo ufw allow 8766/tcp` if UFW is enabled). Test from the tablet with `/api/health`.
-- **Artwork missing:** metadata art URLs may expire or fail; lyrics still work on black.
+- **Artwork missing:** metadata art URLs may expire or fail; song title and artist remain visible on a dark background.
+- **Slider not updating:** reload both the unpacked extension and YouTube Music tab after upgrading Atlas. Protocol v2 requires the new extension build. Check that extension options still point to `ws://192.168.1.14:8777/ws`.
 - **Remote command not moving playback:** the YouTube Music tab must remain open; inspect whether its player buttons still match the content script selectors. An ACK means delivery/click, and the next state report is the actual confirmation.
 - **After Atlas reboot:** both clients reconnect automatically. The display silently darkens after a prolonged disconnect.
 

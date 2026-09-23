@@ -4,6 +4,8 @@ export interface PlaybackRead {
   positionMs: number;
   playing: boolean;
   rate: number;
+  volume: number;
+  muted: boolean;
   clearEvidence: boolean;
   seek: boolean;
 }
@@ -23,6 +25,8 @@ export class ReportGate {
         playing: read.playing,
         ended: false,
         rate: read.rate,
+        volume: read.volume,
+        muted: read.muted,
         seek: read.seek,
       };
     }
@@ -41,6 +45,8 @@ export class ReportGate {
       playing: false,
       ended: true,
       rate: 1,
+      volume: read.volume,
+      muted: read.muted,
     };
   }
 }

@@ -38,15 +38,35 @@
       </section>
     </main>
     <nav id="controls" aria-label="Music controls">
-      <button data-command="PREVIOUS" aria-label="Previous">
-        <svg viewBox="0 0 32 32">
-          <path d="M5 5h3v22H5zm4 11L28 5v22z" />
-        </svg></button
-      ><button id="play" data-command="PLAY_PAUSE" aria-label="Play">
-        <svg viewBox="0 0 32 32"><path d="M10 5v22l18-11z" /></svg></button
-      ><button data-command="NEXT" aria-label="Next">
-        <svg viewBox="0 0 32 32"><path d="M24 5h3v22h-3zM4 5v22l19-11z" /></svg>
-      </button>
+      <div class="control-buttons">
+        <button data-command="PREVIOUS" aria-label="Previous">
+          <svg viewBox="0 0 32 32">
+            <path d="M5 5h3v22H5zm4 11L28 5v22z" />
+          </svg></button
+        ><button id="play" data-command="PLAY_PAUSE" aria-label="Play">
+          <svg viewBox="0 0 32 32"><path d="M10 5v22l18-11z" /></svg></button
+        ><button data-command="NEXT" aria-label="Next">
+          <svg viewBox="0 0 32 32">
+            <path d="M24 5h3v22h-3zM4 5v22l19-11z" />
+          </svg>
+        </button>
+      </div>
+      <div class="volume-control">
+        <svg aria-hidden="true" viewBox="0 0 32 32">
+          <path
+            d="M4 12v8h6l8 7V5l-8 7H4zm18-2a9 9 0 0 1 0 12v-3a5 5 0 0 0 0-6v-3zm3-4a15 15 0 0 1 0 20v-3a11 11 0 0 0 0-14V6z"
+          />
+        </svg>
+        <input
+          id="volume"
+          type="range"
+          min="0"
+          max="100"
+          step="1"
+          value="100"
+          aria-label="Volume"
+        />
+      </div>
     </nav>
     <script src="/display/app.js"></script>
   </body>

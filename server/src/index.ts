@@ -183,7 +183,7 @@ wss.on("connection", (ws) => {
     }
     if (
       role === "display" &&
-      msg.type === "CONTROL_COMMAND" &&
+      (msg.type === "CONTROL_COMMAND" || msg.type === "SET_VOLUME") &&
       !pendingCommands.has(msg.id)
     ) {
       if (!source || source.readyState !== WebSocket.OPEN) {

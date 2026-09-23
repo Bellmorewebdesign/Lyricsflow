@@ -1,4 +1,10 @@
-import type { Snapshot, Command } from "../../shared/protocol.js";
+import {
+  PROTOCOL_VERSION,
+  type Snapshot,
+  type Command,
+} from "../../shared/protocol.js";
+import { ArtworkView, showTrackMetadata } from "./artwork.js";
+import { VolumeThrottle } from "./volume.js";
 import {
   displayState,
   effectivePosition,
@@ -15,12 +21,12 @@ const coverAlbumEl = document.querySelector<HTMLElement>("#cover-album")!;
 const lyricEls = Array.from(document.querySelectorAll<HTMLElement>(".line"));
 const controls = document.querySelector<HTMLElement>("#controls")!;
 const playButton = document.querySelector<HTMLButtonElement>("#play")!;
+const volumeEl = document.querySelector<HTMLInputElement>("#volume")!;
 const artEls = [
   document.querySelector<HTMLElement>("#art-a")!,
   document.querySelector<HTMLElement>("#art-b")!,
 ];
-let artSide = 0;
-let artUrl = "";
+const artwork = new ArtworkView(coverEl, artEls, location.href);
 let socket: WebSocket | null = null;
 let snapshot: Snapshot | null = null;
 let receipt = performance.now();
@@ -30,6 +36,9 @@ let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
 let renderTimer: ReturnType<typeof setTimeout> | null = null;
 let standbyTimer: ReturnType<typeof setTimeout> | null = null;
 let controlsTimer: ReturnType<typeof setTimeout> | null = null;
+let volumeTimer: ReturnType<typeof setTimeout> | null = null;
+let volumeDragging = false;
+let volumePending: { value: number; id: string } | null = null;
 let disconnectedAt: number | null = null;
 let pausedAt: number | null = null;
 let lastActive = 0;
@@ -56,31 +65,6 @@ function applyState(next: DisplayState): void {
     scene.classList.toggle("no-lyrics", next === "NO_LYRICS");
   document.body.classList.toggle("black", !visible);
 }
-function showArtwork(url: string): void {
-  if (url === artUrl) return;
-  artUrl = url;
-  artSide = 1 - artSide;
-  const incoming = artEls[artSide]!;
-  const outgoing = artEls[1 - artSide]!;
-  // HTTPS artwork or an image hosted by Atlas; no arbitrary CSS from a source.
-  let safe = "";
-  try {
-    if (!url) throw new Error("no artwork");
-    const parsed = new URL(url, location.href);
-    if (parsed.protocol === "https:" || parsed.origin === location.origin)
-      safe = parsed.href;
-  } catch {}
-  incoming.style.backgroundImage = safe
-    ? "url(" + JSON.stringify(safe) + ")"
-    : "none";
-  incoming.classList.add("active");
-  outgoing.classList.remove("active");
-  coverEl.style.visibility = safe ? "visible" : "hidden";
-  if (safe) coverEl.src = safe;
-}
-coverEl.onerror = () => {
-  coverEl.style.visibility = "hidden";
-};
 function render(): void {
   if (renderTimer) {
     clearTimeout(renderTimer);
@@ -112,17 +96,14 @@ function render(): void {
     trackVersion = snapshot.version;
     activeLine = -99;
   }
-  if (titleEl.textContent !== snapshot.track.title)
-    titleEl.textContent = snapshot.track.title;
-  if (artistEl.textContent !== snapshot.track.artist)
-    artistEl.textContent = snapshot.track.artist;
-  if (coverTitleEl.textContent !== snapshot.track.title)
-    coverTitleEl.textContent = snapshot.track.title;
-  if (coverArtistEl.textContent !== snapshot.track.artist)
-    coverArtistEl.textContent = snapshot.track.artist;
-  if (coverAlbumEl.textContent !== (snapshot.track.album || ""))
-    coverAlbumEl.textContent = snapshot.track.album || "";
-  showArtwork(snapshot.track.artwork || "");
+  showTrackMetadata(snapshot.track, {
+    title: titleEl,
+    artist: artistEl,
+    coverTitle: coverTitleEl,
+    coverArtist: coverArtistEl,
+    coverAlbum: coverAlbumEl,
+  });
+  artwork.show(snapshot.track.artwork || "", snapshot.version);
   if (next === "NO_LYRICS" || !snapshot.lyrics?.lines.length) return;
   const position = effectivePosition(snapshot, receipt, performance.now());
   const lines = snapshot.lyrics.lines;
@@ -176,6 +157,7 @@ function receive(next: Snapshot): void {
   if (next.sourceConnected) disconnectedAt = null;
   snapshot = next;
   receipt = now;
+  syncVolume();
   playButton.setAttribute("aria-label", next.playing ? "Pause" : "Play");
   playButton.innerHTML = next.playing
     ? '<svg viewBox="0 0 32 32"><path d="M9 6h5v20H9zm9 0h5v20h-5z"/></svg>'
@@ -193,7 +175,13 @@ function connect(): void {
     connected = true;
     disconnectedAt = null;
     reconnectDelay = 1000;
-    ws.send(JSON.stringify({ type: "HELLO", role: "display", protocol: 1 }));
+    ws.send(
+      JSON.stringify({
+        type: "HELLO",
+        role: "display",
+        protocol: PROTOCOL_VERSION,
+      }),
+    );
     render();
   };
   ws.onmessage = (event) => {
@@ -204,6 +192,14 @@ function connect(): void {
       return;
     }
     if (msg.type === "SERVER_STATE") receive(msg as Snapshot);
+    if (
+      msg.type === "CONTROL_ACK" &&
+      volumePending?.id === msg.id &&
+      !msg.delivered
+    ) {
+      volumePending = null;
+      syncVolume();
+    }
   };
   ws.onclose = () => {
     if (socket !== ws) return;
@@ -218,8 +214,66 @@ function connect(): void {
 function reveal(): void {
   controls.classList.add("visible");
   if (controlsTimer) clearTimeout(controlsTimer);
-  controlsTimer = setTimeout(() => controls.classList.remove("visible"), 4500);
+  controlsTimer = setTimeout(() => {
+    if (volumeDragging) reveal();
+    else controls.classList.remove("visible");
+  }, 4500);
 }
+function syncVolume(): void {
+  if (!snapshot || volumeDragging || !Number.isFinite(snapshot.volume)) return;
+  if (volumePending) {
+    if (Math.abs(snapshot.volume - volumePending.value) > 0.005) return;
+    volumePending = null;
+    if (volumeTimer) clearTimeout(volumeTimer);
+  }
+  volumeEl.value = String(Math.round(snapshot.volume * 100));
+  volumeEl.setAttribute(
+    "aria-valuetext",
+    Math.round(snapshot.volume * 100) + "%",
+  );
+  volumeEl.parentElement?.classList.toggle("muted", snapshot.muted);
+}
+function sendVolume(value: number): void {
+  if (socket?.readyState !== WebSocket.OPEN) return;
+  const id = String(Date.now()) + "-" + Math.random().toString(36).slice(2);
+  volumePending = { value, id };
+  socket.send(JSON.stringify({ type: "SET_VOLUME", volume: value, id }));
+  if (volumeTimer) clearTimeout(volumeTimer);
+  volumeTimer = setTimeout(() => {
+    volumePending = null;
+    syncVolume();
+  }, 2500);
+}
+const volumeThrottle = new VolumeThrottle(sendVolume);
+function finishVolume(): void {
+  if (!volumeDragging) return;
+  volumeDragging = false;
+  volumeThrottle.finish(Number(volumeEl.value) / 100);
+  reveal();
+  if (!volumePending) syncVolume();
+}
+volumeEl.addEventListener("touchstart", () => {
+  volumeDragging = true;
+  reveal();
+});
+volumeEl.addEventListener("mousedown", () => {
+  volumeDragging = true;
+  reveal();
+});
+volumeEl.addEventListener("touchend", finishVolume);
+volumeEl.addEventListener("touchcancel", finishVolume);
+volumeEl.addEventListener("mouseup", finishVolume);
+volumeEl.addEventListener("blur", finishVolume);
+volumeEl.addEventListener("input", () => {
+  volumeDragging = true;
+  reveal();
+  volumeThrottle.input(Number(volumeEl.value) / 100);
+});
+volumeEl.addEventListener("change", () => {
+  volumeDragging = false;
+  volumeThrottle.finish(Number(volumeEl.value) / 100);
+  reveal();
+});
 document.body.addEventListener("click", reveal);
 controls.addEventListener("click", (event) => event.stopPropagation());
 for (const button of Array.from(

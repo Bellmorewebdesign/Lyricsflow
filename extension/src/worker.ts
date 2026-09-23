@@ -1,4 +1,8 @@
-import type { SourceState, Command } from "../../shared/protocol.js";
+import {
+  parseIncoming,
+  PROTOCOL_VERSION,
+  type SourceState,
+} from "../../shared/protocol.js";
 declare const chrome: any;
 const DEFAULT_URL = "ws://192.168.1.14:8766/ws";
 let socket: WebSocket | null = null;
@@ -26,7 +30,11 @@ function connect(): void {
         ws.onopen = () => {
           retry = 1000;
           ws.send(
-            JSON.stringify({ type: "HELLO", role: "source", protocol: 1 }),
+            JSON.stringify({
+              type: "HELLO",
+              role: "source",
+              protocol: PROTOCOL_VERSION,
+            }),
           );
           if (lastState && Date.now() - lastReport < 15000)
             ws.send(JSON.stringify(lastState));
@@ -36,17 +44,8 @@ function connect(): void {
               .catch(() => {});
         };
         ws.onmessage = (event) => {
-          let msg: any;
-          try {
-            msg = JSON.parse(event.data);
-          } catch {
-            return;
-          }
-          if (
-            msg.type !== "CONTROL_COMMAND" ||
-            !["PREVIOUS", "PLAY_PAUSE", "NEXT"].includes(msg.command) ||
-            typeof msg.id !== "string"
-          )
+          const msg = parseIncoming(event.data);
+          if (msg?.type !== "CONTROL_COMMAND" && msg?.type !== "SET_VOLUME")
             return;
           if (selectedTab === null) {
             ws.send(
@@ -59,10 +58,12 @@ function connect(): void {
             return;
           }
           chrome.tabs
-            .sendMessage(selectedTab, {
-              type: "CONTROL",
-              command: msg.command as Command,
-            })
+            .sendMessage(
+              selectedTab,
+              msg.type === "SET_VOLUME"
+                ? { type: "SET_VOLUME", volume: msg.volume }
+                : { type: "CONTROL", command: msg.command },
+            )
             .then((answer: { delivered?: boolean }) => {
               if (ws.readyState === WebSocket.OPEN)
                 ws.send(
@@ -134,6 +135,8 @@ chrome.runtime.onMessage.addListener((message: any, sender: any) => {
 });
 chrome.tabs.onRemoved.addListener((tabId: number) => {
   if (tabId !== selectedTab) return;
+  const volume = lastState?.volume ?? 1;
+  const muted = lastState?.muted ?? false;
   selectedTab = null;
   lastState = null;
   if (socket?.readyState === WebSocket.OPEN)
@@ -145,6 +148,8 @@ chrome.tabs.onRemoved.addListener((tabId: number) => {
         playing: false,
         ended: true,
         rate: 1,
+        volume,
+        muted,
       }),
     );
 });

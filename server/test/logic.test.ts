@@ -11,6 +11,11 @@ import {
 } from "../src/lyrics.js";
 import { parsePlayerMetadata } from "../../extension/src/metadata.js";
 import { ReportGate } from "../../extension/src/report-gate.js";
+import {
+  observeVolume,
+  readMediaVolume,
+  setMediaVolume,
+} from "../../extension/src/volume.js";
 import { StateStore } from "../src/state.js";
 import { parseIncoming } from "../../shared/protocol.js";
 import {
@@ -18,6 +23,8 @@ import {
   effectivePosition,
   lineIndex,
 } from "../../display/src/model.js";
+import { ArtworkView, showTrackMetadata } from "../../display/src/artwork.js";
+import { VolumeThrottle } from "../../display/src/volume.js";
 const track = {
   title: "Song (Official Video)",
   artist: "The Band feat. Guest",
@@ -79,6 +86,8 @@ test("incomplete metadata during a player transition never clears a valid track"
     positionMs: 0,
     playing: true,
     rate: 1,
+    volume: 0.37,
+    muted: false,
     clearEvidence: false,
     seek: false,
   });
@@ -87,6 +96,8 @@ test("incomplete metadata during a player transition never clears a valid track"
     positionMs: 0,
     playing: false,
     rate: 1,
+    volume: 0.37,
+    muted: false,
     clearEvidence: true,
     seek: true,
   };
@@ -105,6 +116,8 @@ test("duration loss does not make an otherwise valid player bar a clear signal",
       positionMs: 1000,
       playing: true,
       rate: 1,
+      volume: 0.37,
+      muted: false,
       clearEvidence: false,
       seek: false,
     },
@@ -117,6 +130,8 @@ test("duration loss does not make an otherwise valid player bar a clear signal",
         positionMs: 0,
         playing: false,
         rate: 1,
+        volume: 0.37,
+        muted: false,
         clearEvidence: false,
         seek: true,
       },
@@ -240,10 +255,191 @@ test("message validation rejects malformed and unknown commands", () => {
   );
   assert.equal(
     parseIncoming(
-      JSON.stringify({ type: "HELLO", role: "display", protocol: 1 }),
+      JSON.stringify({ type: "HELLO", role: "display", protocol: 2 }),
     )?.type,
     "HELLO",
   );
+});
+test("volume protocol accepts only finite unit values and short nonempty ids", () => {
+  for (const volume of [-0.01, 1.01, null, "0.5", Infinity, NaN])
+    assert.equal(
+      parseIncoming(JSON.stringify({ type: "SET_VOLUME", volume, id: "v" })),
+      null,
+    );
+  assert.equal(
+    parseIncoming(JSON.stringify({ type: "SET_VOLUME", volume: 0.37, id: "" })),
+    null,
+  );
+  assert.equal(
+    parseIncoming(
+      JSON.stringify({ type: "SET_VOLUME", volume: 0.37, id: "a".repeat(81) }),
+    ),
+    null,
+  );
+  assert.deepEqual(
+    parseIncoming(
+      JSON.stringify({ type: "SET_VOLUME", volume: 0.37, id: "v" }),
+    ),
+    { type: "SET_VOLUME", volume: 0.37, id: "v" },
+  );
+  for (const volume of [-1, 2, null])
+    assert.equal(
+      parseIncoming(
+        JSON.stringify({
+          type: "SOURCE_STATE",
+          track: null,
+          positionMs: 0,
+          playing: false,
+          ended: true,
+          rate: 1,
+          volume,
+          muted: false,
+        }),
+      ),
+      null,
+    );
+});
+test("media volume reports desktop changes and unmute on positive tablet input", () => {
+  const media = new EventTarget() as HTMLMediaElement;
+  media.volume = 0.37;
+  media.muted = true;
+  const observed: { volume: number; muted: boolean }[] = [];
+  const stop = observeVolume(media, () =>
+    observed.push(readMediaVolume(media)),
+  );
+  media.volume = 0.42;
+  media.dispatchEvent(new Event("volumechange"));
+  assert.deepEqual(observed, [{ volume: 0.42, muted: true }]);
+  assert.equal(setMediaVolume(media, 0.65), true);
+  assert.deepEqual(readMediaVolume(media), { volume: 0.65, muted: false });
+  assert.equal(setMediaVolume(media, 3), true);
+  assert.equal(media.volume, 1);
+  assert.equal(setMediaVolume(media, -3), true);
+  assert.equal(media.volume, 0);
+  stop();
+  media.dispatchEvent(new Event("volumechange"));
+  assert.equal(observed.length, 1);
+});
+test("Atlas publishes only reported media volume; changes do not reset lyrics", () => {
+  const store = new StateStore();
+  store.connect();
+  const first = {
+    type: "SOURCE_STATE" as const,
+    track,
+    positionMs: 1000,
+    playing: true,
+    ended: false,
+    rate: 1,
+    volume: 0.37,
+    muted: false,
+  };
+  assert.equal(store.update(first), true);
+  store.setLyrics(store.snapshot.version, {
+    provider: "test",
+    lines: [{ startMs: 0, text: "line" }],
+  });
+  assert.equal(store.snapshot.volume, 0.37);
+  assert.equal(store.update({ ...first, volume: 0.65, muted: true }), false);
+  assert.equal(store.snapshot.volume, 0.65);
+  assert.equal(store.snapshot.muted, true);
+  assert.equal(
+    displayState(store.snapshot, true, Date.now(), null, Date.now()),
+    "PLAYING",
+  );
+});
+test("slider bounds drag traffic and sends the exact final value", async () => {
+  const values: number[] = [];
+  const sender = new VolumeThrottle(
+    (value) => values.push(value),
+    Date.now,
+    150,
+  );
+  for (let i = 0; i < 100; i++) sender.input(i / 100);
+  assert.deepEqual(values, [0]);
+  sender.finish(0.37);
+  assert.deepEqual(values, [0, 0.37]);
+  await new Promise((resolve) => setTimeout(resolve, 170));
+  assert.deepEqual(values, [0, 0.37]);
+});
+test("failed or absent cover fades out while track metadata remains available", () => {
+  const makeLayer = () => ({
+    style: { backgroundImage: "" },
+    classList: {
+      active: false,
+      add() {
+        this.active = true;
+      },
+      remove() {
+        this.active = false;
+      },
+    },
+  });
+  const layers = [makeLayer(), makeLayer()];
+  const cover = {
+    style: { display: "" },
+    src: "",
+    onload: null as null | (() => void),
+    onerror: null as null | (() => void),
+    removeAttribute() {
+      this.src = "";
+    },
+  };
+  const view = new ArtworkView(
+    cover as unknown as HTMLImageElement,
+    layers as unknown as HTMLElement[],
+    "http://atlas.local/display",
+  );
+  const fields = Object.fromEntries(
+    ["title", "artist", "coverTitle", "coverArtist", "coverAlbum"].map(
+      (key) => [key, { textContent: "" }],
+    ),
+  ) as unknown as Parameters<typeof showTrackMetadata>[1];
+  showTrackMetadata({ ...track, album: "Album" }, fields);
+  view.show("https://example.com/old.jpg", 1);
+  cover.onload?.();
+  assert.equal(cover.style.display, "block");
+  view.show("https://example.com/broken.jpg", 2);
+  assert.equal(cover.style.display, "none");
+  cover.onerror?.();
+  assert.equal(layers[0]?.style.backgroundImage, "none");
+  assert.equal(fields.coverTitle.textContent, track.title);
+  assert.equal(fields.coverArtist.textContent, track.artist);
+  view.show("", 3);
+  assert.equal(cover.style.display, "none");
+  assert.equal(cover.src, "");
+  assert.equal(layers[1]?.style.backgroundImage, "none");
+  showTrackMetadata(
+    { ...track, title: "Next", artist: "Other", artwork: "" },
+    fields,
+  );
+  assert.equal(fields.coverTitle.textContent, "Next");
+  assert.equal(fields.coverArtist.textContent, "Other");
+  assert.equal(fields.coverAlbum.textContent, "");
+});
+test("track stays visible through lyric loading, empty lines and provider error", () => {
+  const store = new StateStore();
+  store.connect();
+  store.update({
+    type: "SOURCE_STATE",
+    track,
+    positionMs: 0,
+    playing: true,
+    ended: false,
+    rate: 1,
+    volume: 0.5,
+    muted: false,
+  });
+  const version = store.snapshot.version;
+  assert.equal(displayState(store.snapshot, true, 0, null, 0), "NO_LYRICS");
+  // A rejected provider request leaves the snapshot lyrics null.
+  assert.equal(displayState(store.snapshot, true, 1000, null, 0), "NO_LYRICS");
+  store.setLyrics(version, { provider: "test", lines: [] });
+  assert.equal(displayState(store.snapshot, true, 2000, null, 0), "NO_LYRICS");
+  store.setLyrics(version, {
+    provider: "test",
+    lines: [{ startMs: 1000, text: "line" }],
+  });
+  assert.equal(displayState(store.snapshot, true, 3000, null, 0), "PLAYING");
 });
 test("state versions and stale lyrics", () => {
   const store = new StateStore();
@@ -256,6 +452,8 @@ test("state versions and stale lyrics", () => {
       playing: true,
       ended: false,
       rate: 1,
+      volume: 0.37,
+      muted: false,
     }),
     true,
   );
@@ -267,6 +465,8 @@ test("state versions and stale lyrics", () => {
       playing: true,
       ended: false,
       rate: 1,
+      volume: 0.37,
+      muted: false,
     }),
     false,
   );
@@ -278,6 +478,8 @@ test("state versions and stale lyrics", () => {
     playing: false,
     ended: false,
     rate: 1,
+    volume: 0.37,
+    muted: false,
     seek: true,
   });
   assert.ok(store.snapshot.positionMs === 90000);
@@ -292,6 +494,8 @@ test("interpolation, seeking, pause and lyric selection", () => {
     playing: true,
     ended: false,
     rate: 1,
+    volume: 0.37,
+    muted: false,
   });
   const snap = store.snapshot;
   assert.equal(effectivePosition(snap, 100, 2100), 6000);
@@ -304,6 +508,8 @@ test("interpolation, seeking, pause and lyric selection", () => {
     playing: false,
     ended: false,
     rate: 1,
+    volume: 0.37,
+    muted: false,
     seek: true,
   });
   assert.equal(effectivePosition(store.snapshot, 100, 2100), 9000);
@@ -318,6 +524,8 @@ test("pause timeout and silent disconnect", () => {
     playing: false,
     ended: false,
     rate: 1,
+    volume: 0.37,
+    muted: false,
   });
   store.setLyrics(1, { provider: "test", lines: [{ startMs: 0, text: "hi" }] });
   assert.equal(displayState(store.snapshot, true, 59999, 0, 0), "PAUSED");
@@ -326,4 +534,19 @@ test("pause timeout and silent disconnect", () => {
   store.setLyrics(1, null);
   assert.equal(displayState(store.snapshot, true, 59999, 0, 0), "NO_LYRICS");
   assert.equal(displayState(store.snapshot, true, 60000, 0, 0), "STANDBY");
+  assert.equal(displayState(store.snapshot, true, 0, null, 0), "NO_LYRICS");
+  assert.equal(
+    displayState(
+      { ...store.snapshot, track: { ...track, artwork: "" } },
+      true,
+      59999,
+      0,
+      0,
+    ),
+    "NO_LYRICS",
+  );
+  assert.equal(
+    displayState({ ...store.snapshot, track: null }, true, 10000, null, 0),
+    "STANDBY",
+  );
 });
