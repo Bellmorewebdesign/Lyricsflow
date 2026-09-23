@@ -252,9 +252,24 @@ const heartbeat = setInterval(() => {
 server.listen(port, host, () =>
   console.info(`Lyricsflow listening at http://${host}:${port}/display`),
 );
-process.on("SIGTERM", () => {
+let shuttingDown = false;
+function shutdown(): void {
+  if (shuttingDown) return;
+  shuttingDown = true;
   lookups.stop();
   clearInterval(heartbeat);
+  for (const pending of pendingCommands.values()) clearTimeout(pending.timer);
+  pendingCommands.clear();
+  // Upgraded WebSocket connections are not drained by HTTP server.close().
+  // Close them before waiting for ws.close(), including when the tablet stays open.
+  for (const ws of wss.clients) ws.close(1001, "Server restarting");
   server.close();
   wss.close();
-});
+  const forceClose = setTimeout(() => {
+    for (const ws of wss.clients) ws.terminate();
+    server.closeAllConnections();
+  }, 1500);
+  forceClose.unref();
+}
+process.on("SIGTERM", shutdown);
+process.on("SIGINT", shutdown);

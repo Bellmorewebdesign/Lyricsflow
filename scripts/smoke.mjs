@@ -172,11 +172,29 @@ try {
   assert.equal((await missing).track.artist, "Ensemble");
   assert.equal(invalidForwarded, false);
   source.off("message", onInvalid);
+  assert.equal(
+    child.exitCode,
+    null,
+    "server is still running with open clients",
+  );
+  const stopped = await new Promise((resolve, reject) => {
+    const timeout = setTimeout(
+      () => reject(new Error("SIGTERM did not drain connected clients")),
+      3000,
+    );
+    child.once("exit", (code, signal) => {
+      clearTimeout(timeout);
+      resolve({ code, signal });
+    });
+    child.kill("SIGTERM");
+  });
+  assert.deepEqual(stopped, { code: 0, signal: null });
   console.log(
-    "Smoke passed: HTTP, timed and missing lyrics, artwork view, controls, volume round trip and ACK",
+    "Smoke passed: HTTP, timed and missing lyrics, artwork view, controls, volume round trip, ACK and clean shutdown",
   );
 } finally {
-  display?.close();
-  source?.close();
-  child.kill("SIGTERM");
+  display?.terminate();
+  source?.terminate();
+  if (child.exitCode === null && child.signalCode === null)
+    child.kill("SIGKILL");
 }
