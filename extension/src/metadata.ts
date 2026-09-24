@@ -125,10 +125,13 @@ export class PlayerPositionTracker {
   private clock: number | null = null;
   private since = 0;
   private transitionUntil = 0;
+  private lastMediaMs: number | null = null;
+  private awaitingNewClock = false;
   beginTransition(now: number): void {
     // The player bar may still show the outgoing song's clock after the
     // media element has already restarted for the next song.
-    this.transitionUntil = now + 3500;
+    this.transitionUntil = now + 10000;
+    this.awaitingNewClock = true;
   }
   resolve(
     bar: Element | null,
@@ -137,6 +140,15 @@ export class PlayerPositionTracker {
     now: number,
     seek = false,
   ): number {
+    // Autoplay can restart the media well after the URL and title change.
+    // Restart the clock handoff at the actual rewind, not only at the DOM edit.
+    if (
+      this.lastMediaMs !== null &&
+      mediaMs <= 30000 &&
+      mediaMs < this.lastMediaMs - 3000
+    )
+      this.beginTransition(now);
+    this.lastMediaMs = mediaMs;
     const clock = readPlayerPosition(bar);
     if (clock === null) {
       this.clock = null;
@@ -146,20 +158,22 @@ export class PlayerPositionTracker {
       this.clock = clock;
       this.since = now;
     }
+    const difference = Math.abs(clock - mediaMs);
+    if (
+      difference <= 1500 ||
+      (now >= this.transitionUntil && difference <= 10000)
+    )
+      this.awaitingNewClock = false;
     if (
       playing &&
-      now < this.transitionUntil &&
-      Math.abs(clock - mediaMs) > 1500
+      (now < this.transitionUntil || this.awaitingNewClock) &&
+      difference > 10000
     )
       return mediaMs;
-    if (
-      playing &&
-      (now - this.since > 2500 || seek) &&
-      Math.abs(clock - mediaMs) > 1500
-    )
+    if (playing && (now - this.since > 2500 || seek) && difference > 1500)
       return mediaMs;
     // Retain the media element's sub-second precision when the clocks agree.
-    return Math.abs(clock - mediaMs) <= 1500 ? clock + (mediaMs % 1000) : clock;
+    return difference <= 1500 ? clock + (mediaMs % 1000) : clock;
   }
 }
 

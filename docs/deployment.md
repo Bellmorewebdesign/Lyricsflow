@@ -51,3 +51,7 @@ Copy `windows/Lyricsflow-MasterVolume.ps1` from Atlas to the Windows desktop and
 ## Repairing early-ending LRCLIB timelines
 
 The "What You Saying" timing fix only changes Atlas's LRCLIB selection. Run `git pull --ff-only && npm ci && npm run build` from `~/Lyricsflow`, then `systemctl --user restart lyricsflow.service`. This update does not require a new Windows companion or extension copy if build `1.0.6` is already installed. Old cached matches are ignored automatically; keep `data/`. For a song with known metadata and a dense lyric file that stops far before the end, Atlas can now use a corroborated full lyric-video timeline under strict title, duration and text-overlap checks.
+
+## Autoplay timing handoff
+
+Build `1.0.7` fixes autoplay when the next YouTube Music URL, old player-bar title and restarted media clock briefly disagree. Update Atlas, then copy its new `dist/extension` folder to a fresh Windows directory, disable the older unpacked extension, load the new one in Edge and reload the YouTube Music tab. The Atlas log should say `Extension connected: 1.0.7`. The Windows master-volume companion is unchanged. Track change logs now include the starting playback position and video ID; they do not log playback position every few seconds.

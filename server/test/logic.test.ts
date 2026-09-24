@@ -221,6 +221,27 @@ test("incoming song uses its restarted media clock while the player bar still sh
   clock.textContent = "0:03 / 3:22";
   assert.equal(tracker.resolve(bar, 3100, true, 2800), 3100);
 });
+test("autoplay media rewind renews the clock handoff after an early URL change", () => {
+  const clock = { textContent: "2:58 / 3:00" };
+  const bar = {
+    querySelector(selector: string) {
+      return selector === ".time-info" ? clock : null;
+    },
+  } as unknown as Element;
+  const tracker = new PlayerPositionTracker();
+  assert.equal(tracker.resolve(bar, 178000, true, 0), 178000);
+  tracker.beginTransition(1000); // next URL appears while song A still plays
+  clock.textContent = "2:59 / 3:00";
+  assert.equal(tracker.resolve(bar, 179000, true, 12000), 179000);
+  // Song B starts after the old transition timer has expired.
+  assert.equal(tracker.resolve(bar, 800, true, 13000), 800);
+  clock.textContent = "3:00 / 3:00"; // still the old bar, still advancing
+  assert.equal(tracker.resolve(bar, 5700, true, 18000), 5700);
+  clock.textContent = "3:01 / 3:00";
+  assert.equal(tracker.resolve(bar, 12000, true, 26000), 12000);
+  clock.textContent = "0:13 / 2:11";
+  assert.equal(tracker.resolve(bar, 13050, true, 27000), 13050);
+});
 test("LRCLIB exact album and duration lookup finds a song beyond search limits", async () => {
   const original = globalThis.fetch;
   const urls: URL[] = [];
@@ -511,6 +532,76 @@ test("autoplay waits for the new media clock and does not attach a new URL to ol
   assert.equal(store.snapshot.lyrics, null);
   assert.equal(store.snapshot.version, 2);
 });
+test("autoplay never binds the next URL to stale player-bar metadata and remembers the media restart", () => {
+  const gate = new ReportGate();
+  const store = new StateStore();
+  store.connect();
+  const read = (title: string, videoId: string, mediaMs: number) => ({
+    track: { title, artist: "Artist", videoId, durationMs: 180000 },
+    positionMs: mediaMs,
+    mediaPositionMs: mediaMs,
+    playing: true,
+    rate: 1,
+    volume: 0.5,
+    muted: false,
+    clearEvidence: false,
+    seek: false,
+  });
+  const initial = gate.accept(read("Old song", "a", 178000), 0)!;
+  assert.equal(initial.track?.videoId, "a");
+  store.update(initial);
+  store.setLyrics(store.snapshot.version, {
+    provider: "test",
+    lines: [{ startMs: 1000, text: "previous song" }],
+  });
+  assert.equal(gate.accept(read("Old song", "b", 179000), 200), null);
+  const restarting = gate.accept(read("Old song", "b", 600), 1200);
+  assert.equal(restarting?.track?.videoId, "a");
+  assert.equal(restarting?.positionMs, 600);
+  assert.equal(restarting?.seek, true);
+  assert.equal(store.update(restarting!), false);
+  assert.equal(store.snapshot.lyrics?.lines[0]?.text, "previous song");
+  // The bar is still stale beyond the old two-and-a-half-second timeout.
+  assert.equal(
+    gate.accept(read("Old song", "b", 3100), 3500)?.track?.videoId,
+    "a",
+  );
+  // The title arrives after the new song's first ten seconds.
+  assert.equal(gate.accept(read("New song", "b", 13200), 13300), null);
+  const next = gate.accept(read("New song", "b", 14100), 14300);
+  assert.equal(next?.track?.title, "New song");
+  assert.equal(next?.positionMs, 14100);
+  assert.equal(next?.seek, true);
+  assert.equal(store.update(next!), true);
+  assert.equal(store.snapshot.track?.videoId, "b");
+  assert.equal(store.snapshot.lyrics, null);
+});
+test("a very late autoplay title still uses the restart after a URL-only state settles", () => {
+  const gate = new ReportGate();
+  const read = (title: string, videoId: string, positionMs: number) => ({
+    track: { title, artist: "Artist", videoId, durationMs: 180000 },
+    positionMs,
+    mediaPositionMs: positionMs,
+    playing: true,
+    rate: 1,
+    volume: 0.5,
+    muted: false,
+    clearEvidence: false,
+    seek: false,
+  });
+  gate.accept(read("Old", "a", 179000), 0);
+  gate.accept(read("Old", "b", 179500), 100);
+  gate.accept(read("Old", "b", 500), 1200);
+  assert.equal(
+    gate.accept(read("Old", "b", 16000), 16500)?.track?.videoId,
+    "b",
+  );
+  assert.equal(gate.accept(read("New", "b", 20900), 21100), null);
+  assert.equal(
+    gate.accept(read("New", "b", 22000), 22000)?.track?.title,
+    "New",
+  );
+});
 test("a URL-only change waits for metadata but a settled repeat can still start", () => {
   const gate = new ReportGate(8000, 700);
   const read = (videoId: string, positionMs: number) => ({
@@ -529,10 +620,14 @@ test("a URL-only change waits for metadata but a settled repeat can still start"
     seek: false,
   });
   gate.accept(read("first", 180000), 0);
-  assert.equal(gate.accept(read("second", 1000), 100), null);
-  assert.equal(gate.accept(read("second", 2000), 900), null);
+  assert.equal(gate.accept(read("second", 1000), 100)?.track?.videoId, "first");
+  assert.equal(gate.accept(read("second", 2000), 900)?.track?.videoId, "first");
   assert.equal(
     gate.accept(read("second", 3500), 2700)?.track?.videoId,
+    "first",
+  );
+  assert.equal(
+    gate.accept(read("second", 16000), 16100)?.track?.videoId,
     "second",
   );
 });

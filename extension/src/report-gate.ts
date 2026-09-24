@@ -17,6 +17,8 @@ export class ReportGate {
   private pendingTrack = "";
   private pendingSince = 0;
   private lastPositionMs = 0;
+  private lastMediaMs: number | null = null;
+  private mediaRestartedAt: number | null = null;
   get needsRecheck(): boolean {
     return !!this.pendingTrack;
   }
@@ -25,6 +27,15 @@ export class ReportGate {
     private readonly settleMs = 700,
   ) {}
   accept(read: PlaybackRead, now: number): SourceState | null {
+    const actualMediaMs = read.mediaPositionMs ?? read.positionMs;
+    if (
+      read.playing &&
+      this.lastMediaMs !== null &&
+      actualMediaMs <= 30000 &&
+      actualMediaMs < this.lastMediaMs - 3000
+    )
+      this.mediaRestartedAt = now;
+    if (read.playing) this.lastMediaMs = actualMediaMs;
     if (read.track) {
       let acceptedTrack = read.track;
       const sameRecording =
@@ -60,23 +71,52 @@ export class ReportGate {
         const changedRecording = !sameRecording;
         // The bar and watch URL can update before the actual playback media.
         // Never pair a new song's lyrics with the outgoing song's currentTime.
-        const actualMediaMs = read.mediaPositionMs ?? read.positionMs;
         const playbackRestarted =
-          actualMediaMs <= 10000 || actualMediaMs < this.lastPositionMs - 3000;
+          actualMediaMs <= 10000 ||
+          actualMediaMs < this.lastPositionMs - 3000 ||
+          (this.mediaRestartedAt !== null &&
+            now - this.mediaRestartedAt < 30000);
         const sameMetadata =
           this.lastTrack.title === acceptedTrack.title &&
           this.lastTrack.artist === acceptedTrack.artist;
         const settle =
           changedRecording && sameMetadata
-            ? Math.max(2500, this.settleMs)
+            ? Math.max(15000, this.settleMs)
             : this.settleMs;
         if (
           now - this.pendingSince < settle ||
           (changedRecording && read.playing && !playbackRestarted)
-        )
+        ) {
+          // A repeated song can restart before the bar identifies the next URL.
+          // Advance the known song from its fresh media clock without binding
+          // a new URL (possibly another song) to stale title/artist metadata.
+          if (
+            changedRecording &&
+            sameMetadata &&
+            this.mediaRestartedAt !== null &&
+            now - this.mediaRestartedAt < 30000
+          ) {
+            this.lastPositionMs = actualMediaMs;
+            return {
+              type: "SOURCE_STATE",
+              track: this.lastTrack,
+              positionMs: actualMediaMs,
+              playing: read.playing,
+              ended: false,
+              rate: read.rate,
+              volume: read.volume,
+              muted: read.muted,
+              seek: read.seek || now === this.mediaRestartedAt,
+            };
+          }
           return null;
+        }
       }
       const changedRecording = !!this.lastTrack && !sameRecording;
+      const changedMetadata =
+        !!this.lastTrack &&
+        (this.lastTrack.title !== acceptedTrack.title ||
+          this.lastTrack.artist !== acceptedTrack.artist);
       // If the player bar still shows the outgoing clock at the instant the
       // new media starts, publish the fresh media clock until the bar catches up.
       const positionMs =
@@ -88,6 +128,9 @@ export class ReportGate {
       this.pendingTrack = "";
       this.lastTrack = acceptedTrack;
       this.lastPositionMs = read.mediaPositionMs ?? read.positionMs;
+      // A URL-only transition can still carry the previous song's title.
+      // Keep the rewind evidence until the real title arrives (or it ages out).
+      if (changedRecording && changedMetadata) this.mediaRestartedAt = null;
       this.emptySince = null;
       return {
         type: "SOURCE_STATE",
@@ -110,6 +153,8 @@ export class ReportGate {
     if (now - this.emptySince < this.graceMs) return null;
     this.lastTrack = null;
     this.lastPositionMs = 0;
+    this.lastMediaMs = null;
+    this.mediaRestartedAt = null;
     this.emptySince = null;
     return {
       type: "SOURCE_STATE",

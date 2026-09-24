@@ -170,6 +170,8 @@ wss.on("connection", (ws) => {
         console.info(
           "Track changed:",
           describeTrack(snap.track),
+          `position=${(msg.positionMs / 1000).toFixed(1)}s`,
+          `video=${snap.track?.videoId || "unknown"}`,
           `volume=${snap.volume === null ? "unknown" : `${Math.round(snap.volume * 100)}%`}`,
         );
         if (simulator && snap.track?.videoId?.startsWith("lyricsflow-demo-")) {
