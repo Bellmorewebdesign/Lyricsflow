@@ -55,3 +55,5 @@ The "What You Saying" timing fix only changes Atlas's LRCLIB selection. Run `git
 ## Autoplay timing handoff
 
 Build `1.0.7` fixes autoplay when the next YouTube Music URL, old player-bar title and restarted media clock briefly disagree. Update Atlas, then copy its new `dist/extension` folder to a fresh Windows directory, disable the older unpacked extension, load the new one in Edge and reload the YouTube Music tab. The Atlas log should say `Extension connected: 1.0.7`. The Windows master-volume companion is unchanged. Track change logs now include the starting playback position and video ID; they do not log playback position every few seconds.
+
+Build `1.0.8` also handles autoplay when YouTube Music continues the HTML media clock across songs. Pull and rebuild Atlas, copy its new `dist/extension` folder onto Windows, reload the unpacked extension in Edge and reload the YouTube Music tab. The Atlas log should say `Extension connected: 1.0.8`. The Windows master-volume companion and the `data/` cache do not need changes.

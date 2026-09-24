@@ -532,6 +532,97 @@ test("autoplay waits for the new media clock and does not attach a new URL to ol
   assert.equal(store.snapshot.lyrics, null);
   assert.equal(store.snapshot.version, 2);
 });
+test("autoplay switches without pause when media currentTime keeps running across songs", () => {
+  const gate = new ReportGate();
+  const store = new StateStore();
+  store.connect();
+  const read = (
+    title: string,
+    videoId: string,
+    mediaPositionMs: number,
+    playerPositionMs: number,
+  ) => ({
+    track: { title, artist: "Artist", videoId, durationMs: 180000 },
+    positionMs: mediaPositionMs,
+    mediaPositionMs,
+    playerPositionMs,
+    playing: true,
+    rate: 1,
+    volume: 0.5,
+    muted: false,
+    clearEvidence: false,
+    seek: false,
+  });
+  store.update(gate.accept(read("Song A", "a", 178000, 178000), 0)!);
+  store.setLyrics(store.snapshot.version, {
+    provider: "test",
+    lines: [{ startMs: 175000, text: "last line of A" }],
+  });
+  assert.equal(gate.accept(read("Song A", "b", 179000, 179000), 200), null);
+  assert.equal(gate.accept(read("Song B", "b", 180000, 179000), 400), null);
+  // Metadata alone must not bind B's lyrics to A's audio.
+  assert.equal(gate.accept(read("Song B", "b", 181000, 0), 650), null);
+  assert.equal(gate.accept(read("Song B", "b", 182000, 0), 1150), null);
+  const switched = gate.accept(read("Song B", "b", 183000, 1000), 1600)!;
+  assert.equal(switched.track?.title, "Song B");
+  assert.equal(switched.positionMs, 1000);
+  assert.equal(switched.seek, true);
+  assert.equal(gate.followsPlayerClock, true);
+  assert.equal(store.update(switched), true);
+  assert.equal(store.snapshot.version, 2);
+  assert.equal(store.snapshot.lyrics, null);
+  const next = gate.accept(
+    { ...read("Song B", "b", 185000, 3000), positionMs: 3000 },
+    3500,
+  )!;
+  assert.equal(next.positionMs, 3000);
+  assert.equal(next.playing, true);
+  assert.equal(gate.followsPlayerClock, true);
+});
+test("confirmed autoplay player clock stays authoritative despite a continuous or missing media clock", () => {
+  const clock = { textContent: "0:01 / 3:00" };
+  const bar = {
+    querySelector(selector: string) {
+      return selector === ".time-info" ? clock : null;
+    },
+  } as unknown as Element;
+  const tracker = new PlayerPositionTracker();
+  tracker.followPlayerClock(true);
+  assert.equal(tracker.resolve(bar, 183000, true, 1600), 1000);
+  clock.textContent = "0:03 / 3:00";
+  assert.equal(tracker.resolve(bar, 185000, true, 3500), 3000);
+  assert.equal(tracker.resolve(bar, 187000, true, 7000), 5000);
+  assert.equal(tracker.resolve(bar, 187000, false, 7500), 5000);
+  clock.textContent = "loading";
+  assert.equal(tracker.resolve(bar, 188000, true, 7500), 6000);
+  clock.textContent = "0:06 / 3:00";
+  assert.equal(tracker.resolve(bar, 190000, true, 8000), 6000);
+  tracker.followPlayerClock(false);
+  assert.equal(tracker.resolve(bar, 6000, true, 9000), 6000);
+});
+test("a backgrounded player bar that freezes at zero cannot block autoplay forever", () => {
+  const gate = new ReportGate();
+  const read = (title: string, id: string, mediaMs: number, barMs: number) => ({
+    track: { title, artist: "Artist", videoId: id, durationMs: 180000 },
+    positionMs: mediaMs,
+    mediaPositionMs: mediaMs,
+    playerPositionMs: barMs,
+    playing: true,
+    rate: 1,
+    volume: 0.5,
+    muted: false,
+    clearEvidence: false,
+    seek: false,
+  });
+  gate.accept(read("Old", "a", 179000, 179000), 0);
+  assert.equal(gate.accept(read("New", "b", 180000, 0), 100), null);
+  assert.equal(gate.accept(read("New", "b", 182000, 0), 2400), null);
+  const next = gate.accept(read("New", "b", 184000, 0), 3300)!;
+  assert.equal(next.track?.title, "New");
+  assert.equal(next.positionMs, 4000);
+  assert.equal(next.playing, true);
+  assert.equal(gate.followsPlayerClock, true);
+});
 test("autoplay never binds the next URL to stale player-bar metadata and remembers the media restart", () => {
   const gate = new ReportGate();
   const store = new StateStore();

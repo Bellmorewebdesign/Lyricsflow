@@ -126,7 +126,13 @@ export class PlayerPositionTracker {
   private since = 0;
   private transitionUntil = 0;
   private lastMediaMs: number | null = null;
+  private mediaAtClock = 0;
   private awaitingNewClock = false;
+  private followPlayer = false;
+  /** The player bar confirmed the new audio while the media clock did not restart. */
+  followPlayerClock(value: boolean): void {
+    this.followPlayer = value;
+  }
   beginTransition(now: number): void {
     // The player bar may still show the outgoing song's clock after the
     // media element has already restarted for the next song.
@@ -151,12 +157,27 @@ export class PlayerPositionTracker {
     this.lastMediaMs = mediaMs;
     const clock = readPlayerPosition(bar);
     if (clock === null) {
+      if (this.followPlayer && this.clock !== null)
+        return (
+          this.clock +
+          (mediaMs >= this.mediaAtClock ? mediaMs - this.mediaAtClock : 0)
+        );
       this.clock = null;
       return mediaMs;
     }
     if (clock !== this.clock) {
       this.clock = clock;
       this.since = now;
+      this.mediaAtClock = mediaMs;
+    }
+    // After a confirmed player-clock restart, the underlying media clock may
+    // be continuous. Never silently jump the displayed lyrics back to it.
+    if (this.followPlayer) {
+      // If the visible seconds stop repainting in a background tab, carry
+      // their last known position forward by actual media progress only.
+      if (now - this.since > 2500 && mediaMs >= this.mediaAtClock)
+        return clock + (mediaMs - this.mediaAtClock);
+      return clock;
     }
     const difference = Math.abs(clock - mediaMs);
     if (

@@ -3,6 +3,7 @@ import {
   PlayerDurationTracker,
   PlayerPositionTracker,
   readPlayerMetadata,
+  readPlayerPosition,
   readTrack,
 } from "./metadata.js";
 import { ReportGate } from "./report-gate.js";
@@ -142,6 +143,7 @@ function report(seek = false, force = false): void {
       track,
       positionMs,
       mediaPositionMs,
+      playerPositionMs: readPlayerPosition(bar),
       playing,
       rate: media?.playbackRate || 1,
       ...(volumes.observe(media) || { volume: null, muted: null }),
@@ -159,6 +161,7 @@ function report(seek = false, force = false): void {
       }, 800);
     return;
   }
+  positions.followPlayerClock(gate.followsPlayerClock);
   const signature = JSON.stringify([
     state.track,
     state.playing,
@@ -171,11 +174,11 @@ function report(seek = false, force = false): void {
     !force &&
     !seek &&
     signature === lastSignature &&
-    Math.abs(positionMs - lastPosition) < 4500
+    Math.abs(state.positionMs - lastPosition) < 4500
   )
     return;
   lastSignature = signature;
-  lastPosition = positionMs;
+  lastPosition = state.positionMs;
   chrome.runtime.sendMessage({ type: "SOURCE_STATE", state }).catch(() => {});
 }
 function control(command: Command): boolean {
