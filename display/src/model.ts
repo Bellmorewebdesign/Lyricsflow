@@ -28,6 +28,17 @@ export function lineIndex(
   }
   return low - 1;
 }
+/** Schedule the next lyric from its timestamp, including densely timed lines. */
+export function nextLineDelay(
+  lines: { startMs: number }[],
+  index: number,
+  position: number,
+  rate: number,
+): number | null {
+  const next = lines[index + 1];
+  if (!next || !Number.isFinite(rate) || rate <= 0) return null;
+  return Math.max(1, Math.min((next.startMs - position) / rate, 10000));
+}
 export function displayState(
   snapshot: Snapshot | null,
   connected: boolean,

@@ -329,11 +329,12 @@ document.addEventListener(
   },
   true,
 );
-// YT Music is an SPA. This also finds replacement media elements and corrects drift.
+// Recheck the source each second so buffering and clock drift reach the tablet
+// promptly; the tablet schedules individual lyric lines without polling.
 setInterval(() => {
   findMedia();
   report(false, true);
-}, 5000);
+}, 1000);
 window.addEventListener("popstate", () =>
   setTimeout(() => report(false, true), 100),
 );

@@ -9,6 +9,7 @@ import {
   displayState,
   effectivePosition,
   lineIndex,
+  nextLineDelay,
   type DisplayState,
 } from "./model.js";
 const scene = document.querySelector<HTMLElement>("#scene")!;
@@ -111,18 +112,11 @@ function render(): void {
     const visible = [index - 1, index, index + 1];
     lyricEls.forEach((el, i) => {
       el.textContent = lines[visible[i] || 0]?.text || "";
-      el.classList.remove("change");
-      void el.offsetWidth;
-      el.classList.add("change");
     });
   }
-  if (next === "PLAYING" && lines[index + 1]) {
-    const remaining = (lines[index + 1]!.startMs - position) / snapshot.rate;
-    renderTimer = setTimeout(
-      render,
-      Math.max(30, Math.min(remaining + 12, 10000)),
-    );
-  }
+  const delay = nextLineDelay(lines, index, position, snapshot.rate);
+  if (next === "PLAYING" && delay !== null)
+    renderTimer = setTimeout(render, delay);
 }
 function receive(next: Snapshot): void {
   if (
@@ -142,7 +136,7 @@ function receive(next: Snapshot): void {
   ) {
     const prior = effectivePosition(snapshot, receipt, now);
     if (Math.abs(prior - next.positionMs) < 400)
-      next.positionMs = prior + (next.positionMs - prior) * 0.3;
+      next.positionMs = prior + (next.positionMs - prior) * 0.75;
   }
   if (next.playing) {
     pausedAt = null;

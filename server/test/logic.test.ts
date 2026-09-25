@@ -34,6 +34,7 @@ import {
   displayState,
   effectivePosition,
   lineIndex,
+  nextLineDelay,
 } from "../../display/src/model.js";
 import { ArtworkView, showTrackMetadata } from "../../display/src/artwork.js";
 import { VolumeSlider, VolumeThrottle } from "../../display/src/volume.js";
@@ -1564,6 +1565,26 @@ test("interpolation, seeking, pause and lyric selection", () => {
     seek: true,
   });
   assert.equal(effectivePosition(store.snapshot, 100, 2100), 9000);
+});
+test("dense lyrics switch at each timestamp without a minimum line cooldown", () => {
+  const lines = [
+    { startMs: 1000 },
+    { startMs: 1050 },
+    { startMs: 1100 },
+    { startMs: 1135 },
+  ];
+  assert.equal(lineIndex(lines, 1049), 0);
+  assert.equal(nextLineDelay(lines, 0, 1001, 1), 49);
+  assert.equal(nextLineDelay(lines, 0, 1001, 2), 24.5);
+  assert.equal(lineIndex(lines, 1050), 1);
+  assert.equal(nextLineDelay(lines, 1, 1050, 1), 50);
+  assert.equal(lineIndex(lines, 1110), 2);
+  assert.equal(nextLineDelay(lines, 2, 1110, 1), 25);
+  assert.equal(lineIndex(lines, 1135), 3);
+  assert.equal(nextLineDelay(lines, 3, 1135, 1), null);
+  // An early browser timer rechecks promptly rather than waiting 30ms.
+  assert.equal(nextLineDelay(lines, 0, 1049.7, 1), 1);
+  assert.equal(nextLineDelay(lines, 0, 0, 0), null);
 });
 test("pause timeout and silent disconnect", () => {
   const store = new StateStore();
