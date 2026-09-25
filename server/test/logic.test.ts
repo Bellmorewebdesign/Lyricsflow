@@ -196,6 +196,12 @@ test("lyrics follow the YouTube Music clock when media currentTime drifts", () =
   const tracker = new PlayerPositionTracker();
   assert.equal(readPlayerPosition(bar), 67000);
   assert.equal(tracker.resolve(bar, 72000, true, 1000), 67000);
+  const fractional = tracker.resolve(bar, 72420, true, 1420);
+  assert.equal(fractional, 67420);
+  assert.equal(
+    lineIndex([{ startMs: 67000 }, { startMs: 67300 }], fractional),
+    1,
+  );
   clock.textContent = "1:08 / 3:07";
   assert.equal(tracker.resolve(bar, 73000, true, 2000), 68000);
   assert.equal(tracker.resolve(bar, 68050, true, 2200), 68050);
@@ -590,6 +596,7 @@ test("confirmed autoplay player clock stays authoritative despite a continuous o
   const tracker = new PlayerPositionTracker();
   tracker.followPlayerClock(true);
   assert.equal(tracker.resolve(bar, 183000, true, 1600), 1000);
+  assert.equal(tracker.resolve(bar, 183350, true, 1950), 1350);
   clock.textContent = "0:03 / 3:00";
   assert.equal(tracker.resolve(bar, 185000, true, 3500), 3000);
   assert.equal(tracker.resolve(bar, 187000, true, 7000), 5000);

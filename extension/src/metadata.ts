@@ -170,6 +170,15 @@ export class PlayerPositionTracker {
       this.since = now;
       this.mediaAtClock = mediaMs;
     }
+    // The visible player time only has whole-second precision. Carry its
+    // position forward by actual media progress between UI clock repaints,
+    // even when media.currentTime has a different absolute origin.
+    const mediaProgress = mediaMs - this.mediaAtClock;
+    const elapsed = Math.max(0, now - this.since);
+    const fractionalProgress =
+      !seek && mediaProgress >= 0 && mediaProgress <= elapsed * 2.5 + 500
+        ? mediaProgress
+        : 0;
     // After a confirmed player-clock restart, the underlying media clock may
     // be continuous. Never silently jump the displayed lyrics back to it.
     if (this.followPlayer) {
@@ -177,7 +186,7 @@ export class PlayerPositionTracker {
       // their last known position forward by actual media progress only.
       if (now - this.since > 2500 && mediaMs >= this.mediaAtClock)
         return clock + (mediaMs - this.mediaAtClock);
-      return clock;
+      return clock + fractionalProgress;
     }
     const difference = Math.abs(clock - mediaMs);
     if (
@@ -193,8 +202,11 @@ export class PlayerPositionTracker {
       return mediaMs;
     if (playing && (now - this.since > 2500 || seek) && difference > 1500)
       return mediaMs;
-    // Retain the media element's sub-second precision when the clocks agree.
-    return difference <= 1500 ? clock + (mediaMs % 1000) : clock;
+    // Absolute media time can be several seconds away from the player bar;
+    // its small increments still restore sub-second timing for dense lyrics.
+    return difference <= 1500
+      ? clock + (mediaMs % 1000)
+      : clock + fractionalProgress;
   }
 }
 
